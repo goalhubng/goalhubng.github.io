@@ -50,13 +50,18 @@
   <link rel="stylesheet" href="styles.css">
   <script>
     // Applied before first paint (inline, in <head>) so switching themes
-    // doesn't flash the wrong one on load.
+    // doesn't flash the wrong one on load. A stored choice (the user has
+    // used the toggle before) always wins; with no stored choice yet, this
+    // follows the device's own light/dark setting automatically instead of
+    // just defaulting to dark for everyone.
     (function () {
       try {
-        if (localStorage.getItem("goalhub_theme") === "light") {
+        const stored = localStorage.getItem("goalhub_theme");
+        const wantsLight = stored ? stored === "light" : window.matchMedia("(prefers-color-scheme: light)").matches;
+        if (wantsLight) {
           document.documentElement.setAttribute("data-theme", "light");
         }
-      } catch (err) { /* localStorage unavailable — default dark stays */ }
+      } catch (err) { /* localStorage/matchMedia unavailable — default dark stays */ }
     })();
   </script>
 </head>

@@ -16,14 +16,23 @@
 }
 
 :root[data-theme="light"] {
-  --bg: #f6f8f7;
-  --panel: rgba(10, 20, 15, 0.035);
-  --panel-strong: rgba(10, 20, 15, 0.06);
-  --border: rgba(10, 20, 15, 0.1);
-  --border-soft: rgba(10, 20, 15, 0.06);
-  --text: #10151a;
-  --text-dim: #5b6672;
-  --body-gradient: linear-gradient(180deg, #ffffff 0%, #f1f4f2 45%, #e8f5ec 100%);
+  --bg: #f4f7f5;
+  --panel: #ffffff;
+  --panel-strong: #eef4f0;
+  --border: rgba(11, 31, 22, 0.14);
+  --border-soft: rgba(11, 31, 22, 0.08);
+  --text: #0b1410;
+  --text-dim: #57685f;
+  --accent-dim: rgba(21, 128, 61, 0.12);
+  --body-gradient: linear-gradient(180deg, #ffffff 0%, #f2f8f4 45%, #e4f5ea 100%);
+}
+
+/* Panels went from near-invisible tints to solid white cards — visible
+   elevation needs a real shadow now, or they'd just look like flat page
+   background with a hairline. Dark mode doesn't need this: its panels
+   are already visually distinct via lighter fill + blur. */
+:root[data-theme="light"] .glass {
+  box-shadow: 0 1px 3px rgba(11, 31, 22, 0.06), 0 1px 2px rgba(11, 31, 22, 0.04);
 }
 
 * { box-sizing: border-box; }
@@ -96,6 +105,19 @@ body::after {
   background: rgba(6, 8, 11, 0.88);
   border-bottom-color: var(--border);
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+}
+
+/* The header was previously hardcoded dark unconditionally — fine in dark
+   mode, but with no light-mode override it stayed dark-translucent over a
+   white page, muddying both the header text and the ambient ombré glow
+   bleeding through beneath it. Light mode needs its own light header. */
+:root[data-theme="light"] .site-header {
+  background: rgba(255, 255, 255, 0.78);
+}
+
+:root[data-theme="light"] .site-header.scrolled {
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 8px 30px rgba(11, 31, 22, 0.08);
 }
 
 /* Fade-in-on-scroll, applied via IntersectionObserver in script.js */
@@ -1354,6 +1376,11 @@ h3 {
   -webkit-backdrop-filter: blur(18px);
   border-top: 1px solid var(--border-soft);
   padding-bottom: env(safe-area-inset-bottom, 0);
+}
+
+:root[data-theme="light"] .mobile-bottom-nav {
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 -4px 20px rgba(11, 31, 22, 0.06);
 }
 
 .mobile-nav-btn {

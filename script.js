@@ -3788,6 +3788,23 @@ function toggleTheme() {
 }
 applyThemeToggleIcon();
 
+// If the visitor has never used the toggle (no explicit choice saved yet),
+// keep following the device's light/dark setting live — e.g. the OS
+// switching to dark at sunset — rather than freezing whatever it was at
+// page load. The moment they do use the toggle, that choice takes over
+// permanently and this listener stops applying (checked fresh each time).
+try {
+  window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", event => {
+    if (localStorage.getItem(THEME_KEY)) return; // explicit choice already made — don't override it
+    if (event.matches) {
+      document.documentElement.setAttribute("data-theme", "light");
+    } else {
+      document.documentElement.removeAttribute("data-theme");
+    }
+    applyThemeToggleIcon();
+  });
+} catch (err) { /* matchMedia unavailable — manual toggle still works fine */ }
+
 // --- Sticky header intensifies (more opaque + shadow) once the page has
 // actually scrolled, rather than looking identical to the resting state.
 window.addEventListener("scroll", () => {
