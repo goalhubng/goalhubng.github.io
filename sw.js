@@ -4,7 +4,7 @@
 // script.js (localStorage-based, with an honest "showing cached results"
 // banner) — this worker only ever touches same-origin static files, so it
 // can't go stale in a way that misrepresents a live match.
-const CACHE_VERSION = "v1";
+const CACHE_VERSION = "v2";
 const SHELL_CACHE = `goalhub-shell-${CACHE_VERSION}`;
 
 const SHELL_FILES = [
@@ -62,16 +62,19 @@ self.addEventListener("fetch", event => {
   }
 
   // Other same-origin static files (script.js, styles.css, icons):
-  // cache-first for speed, refreshing the cache in the background so the
-  // next load picks up a new deploy without needing a hard refresh.
+  // network-first, same as HTML. This site changes daily right now, and a
+  // cache-first strategy here previously meant a phone that cached script.js
+  // once would keep serving that exact copy indefinitely alongside a fresh
+  // HTML file — a real version mismatch (new HTML referencing something an
+  // old cached script.js doesn't know about) that can throw and blank the
+  // whole page. Falls back to cache only when the network genuinely fails.
   event.respondWith(
-    caches.match(event.request).then(cached => {
-      const network = fetch(event.request).then(response => {
+    fetch(event.request)
+      .then(response => {
         const copy = response.clone();
         caches.open(SHELL_CACHE).then(cache => cache.put(event.request, copy));
         return response;
-      }).catch(() => cached);
-      return cached || network;
-    })
+      })
+      .catch(() => caches.match(event.request))
   );
 });

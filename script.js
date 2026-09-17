@@ -3825,6 +3825,15 @@ const scrollFadeObserver = new IntersectionObserver(entries => {
 document.querySelectorAll(".hero-section, .live-now-section, .top-leagues-section, .main-layout")
   .forEach(el => { el.classList.add("scroll-fade"); scrollFadeObserver.observe(el); });
 
+// Safety net: if the observer hasn't revealed a section within 3s (a real,
+// documented quirk in some iOS standalone/PWA WebViews, where
+// IntersectionObserver can fire late or not at all right at launch), force
+// it visible anyway — a page stuck invisible forever is a much worse
+// failure than skipping a fade-in animation.
+setTimeout(() => {
+  document.querySelectorAll(".scroll-fade:not(.in-view)").forEach(el => el.classList.add("in-view"));
+}, 3000);
+
 // --- Auto-refresh for "All Matches": currentFixtures is otherwise only
 // fetched once per page load / date change, so a match that goes from
 // kickoff to live (score, minute, status all changing) just sits stale
