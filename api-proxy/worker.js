@@ -904,6 +904,30 @@ export default {
         const data = await footballDataFetch(env, `/competitions/${competition}/standings?season=${season}`);
         const total = (data.standings || []).find(s => s.type === "TOTAL");
         payload = { table: total ? total.table : [] };
+      } else if (url.pathname === "/fd-fixtures") {
+        // Supplements TheSportsDB's fixtures (GoalHub's main source, see
+        // script.js's fetchFixturesForWindow) with real matches from a
+        // second source, for the 8 leagues football-data.org covers.
+        // Confirmed firsthand that TheSportsDB's free tier can be missing
+        // real matches on a busy day (4 of 7 real Premier League fixtures
+        // were absent on 2026-09-05) — this fills exactly that kind of gap
+        // rather than leaving real matches out.
+        const competition = url.searchParams.get("competition");
+        const date = url.searchParams.get("date");
+        if (!competition || !date) return jsonResponse({ error: "missing competition/date" }, 400);
+        if (!ALLOWED_FOOTBALL_DATA_CODES.has(competition)) return jsonResponse({ error: "unsupported competition" }, 400);
+        const data2 = await footballDataFetch(env, `/competitions/${competition}/matches?dateFrom=${date}&dateTo=${date}`);
+        payload = {
+          matches: (data2.matches || []).map(m => ({
+            id: m.id,
+            utcDate: m.utcDate,
+            status: m.status,
+            home: { name: m.homeTeam.name, crest: m.homeTeam.crest },
+            away: { name: m.awayTeam.name, crest: m.awayTeam.crest },
+            homeScore: m.score && m.score.fullTime ? m.score.fullTime.home : null,
+            awayScore: m.score && m.score.fullTime ? m.score.fullTime.away : null
+          }))
+        };
       } else if (url.pathname === "/debug-raw") {
         // TEMPORARY: echoes the full, unfiltered upstream response (including
         // errors/paging/results metadata) so we can see exactly why a query

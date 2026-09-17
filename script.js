@@ -1496,6 +1496,103 @@ function dateBarLabel(centerDate) {
   return formatApiDate(dateKey(centerDate));
 }
 
+// Which of GoalHub's leagues football-data.org also covers, and its code
+// for each — used by mergeFootballDataFixtures() below to fill in real
+// matches TheSportsDB's free tier is missing (confirmed firsthand: 4 of 7
+// real Premier League fixtures were absent from TheSportsDB on 2026-09-05).
+const FOOTBALL_DATA_LEAGUES = {
+  "Premier League": "PL",
+  "La Liga": "PD",
+  "Serie A": "SA",
+  "Ligue 1": "FL1",
+  "Bundesliga": "BL1",
+  "Eredivisie": "DED",
+  "Primeira Liga": "PPL",
+  "Brasileirao": "BSA"
+};
+
+const FD_STATUS_TO_SPORTSDB_STATUS = {
+  SCHEDULED: "NS",
+  TIMED: "NS",
+  IN_PLAY: "LIVE",
+  PAUSED: "HT",
+  FINISHED: "FT",
+  POSTPONED: "PST",
+  SUSPENDED: "CANC",
+  CANCELLED: "CANC"
+};
+
+// Strips club suffixes ("FC"/"AFC"/"CF") and punctuation so the same team
+// spelled differently across TheSportsDB and football-data.org ("Brentford"
+// vs "Brentford FC") still matches when checking for duplicates.
+function normalizeTeamNameForMatch(name) {
+  return name.toLowerCase().replace(/\b(fc|afc|cf)\b/g, "").replace(/[^a-z0-9]/g, "");
+}
+
+// football-data.org names carry a trailing "FC"/"AFC"/"CF" that TheSportsDB's
+// names don't ("Brentford FC" vs "Brentford") — trimmed only from the end,
+// so a name that's legitimately just "AFC Bournemouth" (prefix) is untouched.
+function cleanFootballDataTeamName(name) {
+  return name.replace(/\s+(FC|AFC|CF)$/i, "").trim();
+}
+
+// Adds any real match football-data.org has for its covered leagues that
+// TheSportsDB's response for that day doesn't — never overrides or
+// duplicates a fixture TheSportsDB already has, and a failure here is
+// silently skipped (a missed supplement, not a broken page) since this is
+// strictly additive on top of the main TheSportsDB-sourced list.
+async function mergeFootballDataFixtures(centerDate, fixtures) {
+  const key = dateKey(centerDate);
+  const byLeague = {};
+  fixtures.forEach(f => { (byLeague[f.league] = byLeague[f.league] || []).push(f); });
+
+  const additions = [];
+  for (const [league, code] of Object.entries(FOOTBALL_DATA_LEAGUES)) {
+    if (!(league in LEAGUE_IDS)) continue; // not currently one of GoalHub's tracked leagues
+    try {
+      const res = await fetch(`${CHAT_WORKER_BASE}/fd-fixtures?competition=${code}&date=${key}`);
+      if (res.ok) {
+        const data = await res.json();
+        const existing = byLeague[league] || [];
+        (data.matches || []).forEach(m => {
+          const homeKey = normalizeTeamNameForMatch(m.home.name);
+          const awayKey = normalizeTeamNameForMatch(m.away.name);
+          const alreadyHave = existing.some(f =>
+            normalizeTeamNameForMatch(f.home.name) === homeKey && normalizeTeamNameForMatch(f.away.name) === awayKey
+          );
+          if (alreadyHave) return;
+          const homeName = cleanFootballDataTeamName(m.home.name);
+          const awayName = cleanFootballDataTeamName(m.away.name);
+          additions.push({
+            id: `fd-${m.id}`,
+            apiFootballId: null,
+            league,
+            time: m.utcDate ? new Date(m.utcDate).toTimeString().slice(0, 5) : "",
+            date: key,
+            status: FD_STATUS_TO_SPORTSDB_STATUS[m.status] || "NS",
+            venue: null,
+            venueId: null,
+            round: null,
+            homeScore: m.homeScore,
+            awayScore: m.awayScore,
+            // No TheSportsDB team id available from this source — left as
+            // "" (NOT undefined: clickableTeam()/openMatchModal() interpolate
+            // this straight into an onclick string, where undefined would
+            // become the truthy literal string "undefined" and break the
+            // fallback below), same as any team clicked from the footer/
+            // search, which already resolves a real id on click via
+            // resolveTeamId().
+            home: { id: "", name: homeName, logo: resolveLogo(m.home.crest, homeName), league },
+            away: { id: "", name: awayName, logo: resolveLogo(m.away.crest, awayName), league }
+          });
+        });
+      }
+    } catch (err) { /* best-effort supplement only */ }
+    await sleep(100);
+  }
+  return fixtures.concat(additions);
+}
+
 async function fetchFixturesForWindow(centerDate) {
   const dateKeys = windowDates(centerDate).map(dateKey);
   const entries = Object.entries(LEAGUE_IDS);
@@ -1528,7 +1625,8 @@ async function fetchFixturesForWindow(centerDate) {
       await sleep(100);
     }
   }
-  return { fixtures: fixturesByLeague.flat(), ok: anyRequestSucceeded };
+  const merged = await mergeFootballDataFixtures(centerDate, fixturesByLeague.flat());
+  return { fixtures: merged, ok: anyRequestSucceeded };
 }
 
 // --- Offline/outage fallback cache: the last successfully-fetched fixture
