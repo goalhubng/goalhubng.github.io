@@ -2054,8 +2054,10 @@ function renderLiveLineupsTab(details) {
 
 // --- Top Leagues strip — a curated set of leagues we actually have real
 // badge art and fixture data for (not a wishlist of competitions like
-// Champions League that aren't in GoalHub's tracked league list).
-const TOP_LEAGUES = ["Premier League", "La Liga", "Serie A", "Bundesliga", "Ligue 1", "Brasileirao", "MLS"];
+// Champions League that aren't in GoalHub's tracked league list). African
+// leagues lead the row rather than being buried in the sidebar's full
+// A-Z list — GoalHub's real audience is Nigeria/West Africa first.
+const TOP_LEAGUES = ["Nigeria NPFL", "Egypt Premier League", "Morocco Botola", "South Africa PSL", "Premier League", "La Liga", "Serie A", "Bundesliga", "Ligue 1", "Brasileirao", "MLS"];
 
 function jumpToLeague(league) {
   setViewMode("matches");
@@ -3835,4 +3837,65 @@ if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("/sw.js").catch(() => { /* offline support just won't be available */ });
   });
+}
+
+// --- "Install the app" banner: only ever shown when genuinely installable
+// (not already installed, and dismissal is remembered so it never nags on
+// a later visit). Chrome/Edge/Android fire beforeinstallprompt and get a
+// real one-tap Install button; iOS Safari has no such API, so it gets a
+// plain instructional line instead — never a button that would do nothing.
+const INSTALL_DISMISSED_KEY = "goalhub_install_dismissed";
+let deferredInstallPrompt = null;
+
+function isAppAlreadyInstalled() {
+  return window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+}
+
+function isIOSSafari() {
+  const ua = navigator.userAgent;
+  const isIOS = /iPad|iPhone|iPod/.test(ua) && !window.MSStream;
+  const isSafari = /Safari/.test(ua) && !/CriOS|FxiOS|EdgiOS/.test(ua);
+  return isIOS && isSafari;
+}
+
+function showInstallBanner() {
+  if (isAppAlreadyInstalled()) return;
+  try {
+    if (localStorage.getItem(INSTALL_DISMISSED_KEY)) return;
+  } catch (err) { /* localStorage unavailable — just show it, no way to remember dismissal anyway */ }
+  const banner = document.getElementById("installBanner");
+  if (!banner) return;
+  banner.hidden = false;
+}
+
+function hideInstallBanner() {
+  const banner = document.getElementById("installBanner");
+  if (banner) banner.hidden = true;
+}
+
+window.addEventListener("beforeinstallprompt", event => {
+  event.preventDefault();
+  deferredInstallPrompt = event;
+  document.getElementById("installBannerBtn").hidden = false;
+  showInstallBanner();
+});
+
+window.addEventListener("appinstalled", hideInstallBanner);
+
+document.getElementById("installBannerBtn").addEventListener("click", async () => {
+  if (!deferredInstallPrompt) return;
+  deferredInstallPrompt.prompt();
+  await deferredInstallPrompt.userChoice;
+  deferredInstallPrompt = null;
+  hideInstallBanner();
+});
+
+document.getElementById("installBannerDismiss").addEventListener("click", () => {
+  try { localStorage.setItem(INSTALL_DISMISSED_KEY, "1"); } catch (err) { /* best-effort only */ }
+  hideInstallBanner();
+});
+
+if (isIOSSafari() && !isAppAlreadyInstalled()) {
+  document.getElementById("installBannerText").textContent = "Install GoalHub: tap Share, then \"Add to Home Screen\".";
+  showInstallBanner();
 }

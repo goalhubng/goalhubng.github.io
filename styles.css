@@ -191,6 +191,64 @@ body::after {
 
 .theme-toggle-btn:hover { background: var(--accent-dim); border-color: var(--accent); }
 
+/* ---------- Install app banner ---------- */
+
+.install-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 10px 20px;
+  background: var(--accent-dim);
+  border-bottom: 1px solid var(--border-soft);
+  text-align: center;
+}
+
+.install-banner-text {
+  font-size: 13px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.install-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.install-banner-btn {
+  padding: 6px 16px;
+  border-radius: 999px;
+  background: var(--accent);
+  border: none;
+  color: #06180c;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.install-banner-btn:hover { filter: brightness(1.08); }
+
+.install-banner-dismiss {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.install-banner-dismiss:hover { color: var(--text); background: var(--panel-strong); }
+
 /* ---------- Hero ---------- */
 
 .hero-section {

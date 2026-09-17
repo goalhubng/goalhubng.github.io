@@ -75,6 +75,16 @@
     </div>
   </header>
 
+  <!-- INSTALL APP BANNER — shown only when genuinely installable and not
+       already dismissed/installed; see script.js's install-banner logic. -->
+  <div class="install-banner" id="installBanner" hidden>
+    <span class="install-banner-text" id="installBannerText">Install GoalHub for quick access — opens full-screen, no browser bar.</span>
+    <div class="install-banner-actions">
+      <button class="install-banner-btn" id="installBannerBtn" hidden>Install</button>
+      <button class="install-banner-dismiss" id="installBannerDismiss" aria-label="Dismiss">&times;</button>
+    </div>
+  </div>
+
   <!-- HERO -->
   <section class="hero-section">
     <h1 class="hero-headline">Never Miss A <span class="accent">Goal</span></h1>
