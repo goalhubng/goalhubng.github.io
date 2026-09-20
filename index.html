@@ -13,7 +13,7 @@
   <meta name="theme-color" id="themeColorMeta" content="#06080b">
   <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="GoalHub">
 
   <!-- iOS splash screens — Safari has no Android-style auto-generated
@@ -63,6 +63,32 @@
         var meta = document.getElementById("themeColorMeta");
         if (meta) meta.setAttribute("content", light ? "#ffffff" : "#06080b");
       } catch (err) { /* localStorage/matchMedia unavailable — default dark stays */ }
+    })();
+  </script>
+  <script>
+    // Build stamp: shown in the footer and in any error banner, so it is obvious
+    // (from a screenshot) which version of the site a phone is actually running.
+    window.GOALHUB_BUILD = "2026-09-20-b";
+    (function () {
+      var shown = false;
+      function show(msg) {
+        if (shown) return;
+        shown = true;
+        function paint() {
+          var box = document.createElement("div");
+          box.setAttribute("role", "alert");
+          box.style.cssText = "position:fixed;left:8px;right:8px;top:calc(8px + env(safe-area-inset-top,0px));z-index:9999;background:#7f1d1d;color:#fff;font:600 13px/1.4 -apple-system,Inter,sans-serif;padding:12px 14px;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.4)";
+          box.innerHTML = "GoalHub hit a problem: " + String(msg).replace(/[<>&]/g, "") + "<br><span style='opacity:.8;font-weight:500'>Build " + window.GOALHUB_BUILD + ". Send a screenshot of this to get it fixed.</span> <a href='#' style='color:#fff;text-decoration:underline;margin-left:6px' onclick='location.reload();return false'>Reload</a>";
+          (document.body || document.documentElement).appendChild(box);
+        }
+        if (document.body) paint(); else document.addEventListener("DOMContentLoaded", paint);
+      }
+      window.addEventListener("error", function (e) {
+        if (e.target && e.target !== window) return; // failed image/stylesheet loads are handled elsewhere
+        if (!e.message || e.message === "Script error.") return;
+        show(e.message + (e.lineno ? " (line " + e.lineno + ")" : ""));
+      });
+      window.addEventListener("unhandledrejection", function () { /* network hiccups are handled in the app itself */ });
     })();
   </script>
 </head>
@@ -156,7 +182,7 @@
       <h4>Leagues</h4>
       <div class="footer-leagues-grid" id="footerLeaguesGrid"></div>
     </div>
-    <div class="site-footer">Match data from API-Football; team profiles from TheSportsDB. GoalHub 2026</div>
+    <div class="site-footer">Match data from API-Football; team profiles from TheSportsDB. GoalHub 2026 · <span id="buildStamp"></span></div>
     <div class="footer-legal-links">
       <a href="#" id="footerInstallLink" onclick="openInstallHelp(); return false;">Install the app</a>·<a href="terms">Terms of Use</a>·<a href="privacy">Privacy Policy</a>
     </div>
@@ -209,6 +235,7 @@
     </div>
   </div>
 
+  <script>document.getElementById("buildStamp").textContent = "build " + window.GOALHUB_BUILD;</script>
   <script src="manual-data.js"></script>
   <script src="script.js"></script>
 </body>
