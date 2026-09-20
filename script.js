@@ -2025,6 +2025,26 @@ function refreshLiveMinutesInMatchList() {
 function setLiveCount(n) {
   const el = document.getElementById("liveBtnCount");
   if (el) el.textContent = n > 0 ? String(n) : "";
+  const badge = document.getElementById("mobileLiveBadge");
+  if (badge) {
+    badge.hidden = !(n > 0);
+    badge.textContent = n > 99 ? "99+" : String(n);
+  }
+}
+
+// Bottom-nav highlight: which of the four tabs matches what's on screen.
+function updateBottomNav() {
+  const active = viewMode === "favorites" || viewMode === "teams" ? "favorites"
+    : viewMode === "mypredictions" || viewMode === "leaderboard" ? "predict"
+    : statusFilter === "live" ? "live"
+    : "scores";
+  document.querySelectorAll(".mobile-nav-btn").forEach(b => b.classList.toggle("active", b.dataset.nav === active));
+}
+
+function goToScores() {
+  resetMatchFilters();
+  setViewMode("matches");
+  window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
 async function renderLiveNowSection() {
@@ -2488,6 +2508,7 @@ function renderLeagueRail() {
 
 function loadMatches() {
   document.getElementById("liveBtn").classList.toggle("active", statusFilter === "live");
+  updateBottomNav();
   renderLeagueRail();
 
   let fixturesToUse = activeLeague === "All" ? currentFixtures : currentFixtures.filter(f => f.league === activeLeague);
@@ -2754,6 +2775,7 @@ async function toggleFavoriteTeam(name) {
 
 function setViewMode(mode) {
   viewMode = mode;
+  updateBottomNav();
   document.body.dataset.view = mode;
   document.getElementById("viewMatchesBtn").classList.toggle("active", mode === "matches");
   document.getElementById("viewTeamsBtn").classList.toggle("active", mode === "teams");

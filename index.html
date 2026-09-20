@@ -155,17 +155,21 @@
 
   <!-- MOBILE BOTTOM NAV (≤699px only — see .mobile-bottom-nav in styles.css) -->
   <nav class="mobile-bottom-nav" id="mobileBottomNav" aria-label="Primary">
-    <button class="mobile-nav-btn" onclick="resetMatchFilters(); setViewMode('matches'); window.scrollTo({top:0,behavior:'smooth'})" aria-label="Scores">
-      <span class="mobile-nav-icon">⚽</span><span>Scores</span>
+    <button class="mobile-nav-btn" data-nav="scores" onclick="goToScores()" aria-label="Scores">
+      <span class="mobile-nav-icon"><svg class="mobile-nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5l3.8 2.8-1.5 4.4H9.7l-1.5-4.4z"/><path d="M12 7.5V3M15.8 10.3l4.2-1.4M14.3 14.7l2.6 3.6M9.7 14.7l-2.6 3.6M8.2 10.3L4 8.9"/></svg></span>
+      <span class="mobile-nav-label">Scores</span>
     </button>
-    <button class="mobile-nav-btn" onclick="jumpToLive()" aria-label="Live scores">
-      <span class="mobile-nav-icon">🔴</span><span>Live</span>
+    <button class="mobile-nav-btn" data-nav="live" onclick="jumpToLive()" aria-label="Live scores">
+      <span class="mobile-nav-icon"><svg class="mobile-nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="2.2" fill="currentColor" stroke="none"/><path d="M8 8a5.6 5.6 0 000 8M16 8a5.6 5.6 0 010 8M5 5a9.6 9.6 0 000 14M19 5a9.6 9.6 0 010 14"/></svg><span class="mobile-nav-badge" id="mobileLiveBadge" hidden></span></span>
+      <span class="mobile-nav-label">Live</span>
     </button>
-    <button class="mobile-nav-btn" onclick="setViewMode('favorites'); window.scrollTo({top:0,behavior:'smooth'})" aria-label="Favorites">
-      <span class="mobile-nav-icon">★</span><span>Favorites</span>
+    <button class="mobile-nav-btn" data-nav="favorites" onclick="setViewMode('favorites'); window.scrollTo({top:0,behavior:'smooth'})" aria-label="Favorites">
+      <span class="mobile-nav-icon"><svg class="mobile-nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5l2.6 5.4 5.9.8-4.3 4.1 1 5.9L12 16.9l-5.2 2.8 1-5.9L3.5 9.7l5.9-.8z"/></svg></span>
+      <span class="mobile-nav-label">Favorites</span>
     </button>
-    <button class="mobile-nav-btn" onclick="setViewMode('mypredictions'); window.scrollTo({top:0,behavior:'smooth'})" aria-label="Predictions">
-      <span class="mobile-nav-icon">🔮</span><span>Predict</span>
+    <button class="mobile-nav-btn" data-nav="predict" onclick="setViewMode('mypredictions'); window.scrollTo({top:0,behavior:'smooth'})" aria-label="Predictions">
+      <span class="mobile-nav-icon"><svg class="mobile-nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.8"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/></svg></span>
+      <span class="mobile-nav-label">Predict</span>
     </button>
   </nav>
 
