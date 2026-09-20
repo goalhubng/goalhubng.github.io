@@ -4361,11 +4361,26 @@ function isAppAlreadyInstalled() {
   return window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
 }
 
-function isIOSSafari() {
+function isIOSDevice() {
   const ua = navigator.userAgent;
-  const isIOS = /iPad|iPhone|iPod/.test(ua) && !window.MSStream;
-  const isSafari = /Safari/.test(ua) && !/CriOS|FxiOS|EdgiOS/.test(ua);
-  return isIOS && isSafari;
+  // iPadOS 13+ reports itself as a Mac, but with a touch screen.
+  return (/iPad|iPhone|iPod/.test(ua) && !window.MSStream) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+
+// "safari"  = real Safari (Add to Home Screen is in its Share menu)
+// "browser" = Chrome/Firefox/Edge on iOS (newer versions have it in Share too)
+// "inapp"   = a browser built into another app (Instagram, Facebook, WhatsApp,
+//             TikTok…) — these cannot add to the Home Screen at all.
+function iosBrowserKind() {
+  const ua = navigator.userAgent;
+  if (/FBAN|FBAV|Instagram|Line\/|Snapchat|TikTok|musical_ly|Twitter|MicroMessenger|GSA\//.test(ua)) return "inapp";
+  if (/CriOS|FxiOS|EdgiOS|OPiOS/.test(ua)) return "browser";
+  if (/Safari/.test(ua)) return "safari";
+  return "inapp"; // a web view: iOS Safari always has "Safari" in its user agent
+}
+
+function isIOSSafari() {
+  return isIOSDevice() && iosBrowserKind() === "safari";
 }
 
 function showInstallBanner() {
@@ -4393,7 +4408,7 @@ window.addEventListener("beforeinstallprompt", event => {
 window.addEventListener("appinstalled", hideInstallBanner);
 
 document.getElementById("installBannerBtn").addEventListener("click", async () => {
-  if (!deferredInstallPrompt) return;
+  if (!deferredInstallPrompt) { openInstallHelp(); return; } // iPhone/iPad: no install prompt exists, so show the steps
   deferredInstallPrompt.prompt();
   await deferredInstallPrompt.userChoice;
   deferredInstallPrompt = null;
@@ -4405,7 +4420,86 @@ document.getElementById("installBannerDismiss").addEventListener("click", () => 
   hideInstallBanner();
 });
 
-if (isIOSSafari() && !isAppAlreadyInstalled()) {
-  document.getElementById("installBannerText").textContent = "Install GoalHub: tap Share, then \"Add to Home Screen\".";
+if (isIOSDevice() && !isAppAlreadyInstalled()) {
+  document.getElementById("installBannerText").textContent = iosBrowserKind() === "inapp"
+    ? "To install GoalHub, open this page in Safari first."
+    : "Add GoalHub to your Home Screen for one-tap access.";
+  const bannerBtn = document.getElementById("installBannerBtn");
+  bannerBtn.textContent = "Show me how";
+  bannerBtn.hidden = false;
   showInstallBanner();
+}
+
+// --- "How to install" sheet. Safari on iPhone/iPad has no install button or
+// prompt at all — the only way is Share > Add to Home Screen — so the steps
+// are spelled out here (with the actual Share icon), reachable from the
+// banner and from the footer even after the banner was dismissed.
+const SHARE_ICON_SVG = '<svg class="install-step-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V3.5M8 7l4-4 4 4"/><path d="M6 11H5.5A1.5 1.5 0 004 12.5v7A1.5 1.5 0 005.5 21h13a1.5 1.5 0 001.5-1.5v-7a1.5 1.5 0 00-1.5-1.5H18"/></svg>';
+const ADD_ICON_SVG = '<svg class="install-step-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="4"/><path d="M12 8v8M8 12h8"/></svg>';
+
+function installStepsHtml(steps) {
+  return `<ol class="install-steps">${steps.map(([icon, text]) => `<li><span class="install-step-badge">${icon}</span><span>${text}</span></li>`).join("")}</ol>`;
+}
+
+function openInstallHelp() {
+  const box = document.getElementById("installHelpContent");
+  let body;
+  if (isAppAlreadyInstalled()) {
+    body = `<p class="install-help-lead">GoalHub is already installed on this device.</p>`;
+  } else if (deferredInstallPrompt) {
+    body = `<p class="install-help-lead">Install GoalHub for one-tap access, full-screen, no browser bar.</p>
+      <button class="auth-submit-btn" onclick="runInstallPrompt()">Install now</button>`;
+  } else if (isIOSDevice() && iosBrowserKind() === "inapp") {
+    body = `<p class="install-help-lead">This page is open inside another app (like Instagram, Facebook or WhatsApp), and those can't add websites to your Home Screen.</p>
+      ${installStepsHtml([
+        ["1", "Tap <strong>Copy link</strong> below."],
+        ["2", "Open the <strong>Safari</strong> app and paste the link into its address bar."],
+        ["3", "Then come back to this button in Safari and follow the steps."]
+      ])}
+      <button class="auth-submit-btn" onclick="copyPageLink(this)">Copy link</button>`;
+  } else if (isIOSDevice()) {
+    body = `<p class="install-help-lead">On iPhone, installing is done from the Share menu — Safari has no Install button. Three taps:</p>
+      ${installStepsHtml([
+        [SHARE_ICON_SVG, "Tap the <strong>Share</strong> button — the square with an arrow pointing up — at the bottom of the screen (or next to the address bar). If you don't see it, tap the <strong>•••</strong> button first."],
+        [ADD_ICON_SVG, "Scroll down the list and tap <strong>Add to Home Screen</strong>. If it isn't there, tap <strong>View More</strong> (or <strong>Edit Actions</strong>) and look again."],
+        ["✓", "Tap <strong>Add</strong> in the top-right corner. GoalHub now sits on your Home Screen like any other app."]
+      ])}
+      ${iosBrowserKind() === "browser" ? `<p class="install-help-note">Using Chrome or another browser? If Add to Home Screen isn't in its Share menu, open this page in <strong>Safari</strong> instead.</p>` : ""}`;
+  } else {
+    body = `<p class="install-help-lead">Your browser can install GoalHub too:</p>
+      ${installStepsHtml([
+        ["1", "Open the browser menu (<strong>⋮</strong> or <strong>•••</strong>)."],
+        ["2", "Choose <strong>Install app</strong> or <strong>Add to Home screen</strong>."]
+      ])}`;
+  }
+  box.innerHTML = `<h2 class="install-help-title">Install GoalHub</h2>${body}`;
+  document.getElementById("installHelpModal").classList.add("open");
+}
+
+function closeInstallHelp() {
+  document.getElementById("installHelpModal").classList.remove("open");
+}
+
+async function runInstallPrompt() {
+  if (!deferredInstallPrompt) return;
+  deferredInstallPrompt.prompt();
+  await deferredInstallPrompt.userChoice;
+  deferredInstallPrompt = null;
+  hideInstallBanner();
+  closeInstallHelp();
+}
+
+async function copyPageLink(btn) {
+  const url = window.location.origin + "/";
+  try {
+    await navigator.clipboard.writeText(url);
+    btn.textContent = "Copied ✓";
+  } catch (err) {
+    btn.textContent = url; // clipboard blocked in this web view — show it so it can be copied by hand
+  }
+}
+
+if (isAppAlreadyInstalled()) {
+  const footerInstall = document.getElementById("footerInstallLink");
+  if (footerInstall) footerInstall.hidden = true;
 }

@@ -4,7 +4,7 @@
 // script.js (localStorage-based, with an honest "showing cached results"
 // banner) — this worker only ever touches same-origin static files, so it
 // can't go stale in a way that misrepresents a live match.
-const CACHE_VERSION = "v2";
+const CACHE_VERSION = "v3";
 const SHELL_CACHE = `goalhub-shell-${CACHE_VERSION}`;
 
 const SHELL_FILES = [

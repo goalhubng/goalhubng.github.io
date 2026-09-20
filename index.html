@@ -11,7 +11,7 @@
   <!-- PWA: installable home-screen app, standalone (no browser chrome) -->
   <link rel="manifest" href="manifest.json">
   <meta name="theme-color" id="themeColorMeta" content="#06080b">
-  <link rel="apple-touch-icon" href="icon-192.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="GoalHub">
@@ -100,6 +100,15 @@
     </div>
   </div>
 
+  <!-- INSTALL HELP: step-by-step "Add to Home Screen" for iPhone/iPad (Safari has no install button) -->
+  <div class="team-modal" id="installHelpModal">
+    <div class="team-modal-backdrop" onclick="closeInstallHelp()"></div>
+    <div class="team-modal-card glass install-help-card">
+      <button class="team-modal-close" onclick="closeInstallHelp()" aria-label="Close">&times;</button>
+      <div id="installHelpContent"></div>
+    </div>
+  </div>
+
   <!-- LOGIN / ACCOUNT MODAL -->
   <div class="team-modal" id="authModal">
     <div class="team-modal-backdrop" onclick="closeAuthModal()"></div>
@@ -149,7 +158,7 @@
     </div>
     <div class="site-footer">Match data from API-Football; team profiles from TheSportsDB. GoalHub 2026</div>
     <div class="footer-legal-links">
-      <a href="terms">Terms of Use</a>·<a href="privacy">Privacy Policy</a>
+      <a href="#" id="footerInstallLink" onclick="openInstallHelp(); return false;">Install the app</a>·<a href="terms">Terms of Use</a>·<a href="privacy">Privacy Policy</a>
     </div>
   </footer>
 
