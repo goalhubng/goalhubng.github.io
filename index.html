@@ -10,7 +10,7 @@
 
   <!-- PWA: installable home-screen app, standalone (no browser chrome) -->
   <link rel="manifest" href="manifest.json">
-  <meta name="theme-color" content="#06080b">
+  <meta name="theme-color" id="themeColorMeta" content="#06080b">
   <link rel="apple-touch-icon" href="icon-192.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -50,17 +50,18 @@
   <link rel="stylesheet" href="styles.css">
   <script>
     // Applied before first paint (inline, in <head>) so switching themes
-    // doesn't flash the wrong one on load. A stored choice (the user has
-    // used the toggle before) always wins; with no stored choice yet, this
-    // follows the device's own light/dark setting automatically instead of
-    // just defaulting to dark for everyone.
+    // doesn't flash the wrong one on load. Default mode is "auto": follow
+    // the device's own light/dark setting. Only an explicit Light/Dark pick
+    // from the toggle (saved under goalhub_theme_mode) overrides that.
     (function () {
       try {
-        const stored = localStorage.getItem("goalhub_theme");
-        const wantsLight = stored ? stored === "light" : window.matchMedia("(prefers-color-scheme: light)").matches;
-        if (wantsLight) {
+        var mode = localStorage.getItem("goalhub_theme_mode") || "auto";
+        var light = mode === "light" || (mode === "auto" && window.matchMedia("(prefers-color-scheme: light)").matches);
+        if (light) {
           document.documentElement.setAttribute("data-theme", "light");
         }
+        var meta = document.getElementById("themeColorMeta");
+        if (meta) meta.setAttribute("content", light ? "#ffffff" : "#06080b");
       } catch (err) { /* localStorage/matchMedia unavailable — default dark stays */ }
     })();
   </script>
@@ -68,23 +69,21 @@
 <body>
 
   <header class="site-header" id="siteHeader">
-    <div class="brand">
+    <a class="brand" href="./" aria-label="GoalHub home">
       <span class="brand-badge">⚽</span>
       <span class="brand-name">Goal<span class="accent">Hub</span></span>
-    </div>
-
-    <nav class="header-nav">
-      <a href="#liveNowSection" class="header-nav-link" onclick="jumpToLive()">Live Scores</a>
-      <a href="#topLeaguesSection" class="header-nav-link">Leagues</a>
-    </nav>
+    </a>
 
     <div class="search-wrap">
       <span class="search-icon">🔍</span>
-      <input type="text" id="searchInput" placeholder="Search teams… Arsenal, Real Madrid" oninput="searchTeams()">
+      <input type="text" id="searchInput" placeholder="Search teams or leagues" oninput="searchTeams()" aria-label="Search teams or leagues">
     </div>
 
     <div class="header-actions">
-      <button class="theme-toggle-btn" id="themeToggleBtn" onclick="toggleTheme()" aria-label="Toggle dark/light theme">🌙</button>
+      <button class="live-pill" id="liveBtn" onclick="jumpToLive()" aria-label="Show live matches">
+        <span class="live-dot"></span>LIVE<span class="live-pill-count" id="liveBtnCount"></span>
+      </button>
+      <button class="theme-toggle-btn" id="themeToggleBtn" onclick="toggleTheme()" aria-label="Theme: automatic (follows your device). Tap to switch to light." title="Theme: automatic (follows your device). Tap to switch to light.">🌓</button>
       <div class="auth-area" id="authArea">
         <button class="auth-btn" id="authBtn" onclick="openAuthModal()">Login</button>
       </div>
@@ -101,30 +100,6 @@
     </div>
   </div>
 
-  <!-- HERO -->
-  <section class="hero-section">
-    <h1 class="hero-headline">Never Miss A <span class="accent">Goal</span></h1>
-    <p class="hero-sub">Real live scores, full squads, and standings for 40+ leagues worldwide — updated as it happens.</p>
-    <div class="hero-actions">
-      <button class="hero-btn hero-btn-primary" onclick="document.getElementById('liveNowSection').scrollIntoView({behavior:'smooth'})">View Live Games</button>
-      <button class="hero-btn hero-btn-secondary" onclick="openAuthModal()">Sign In</button>
-    </div>
-  </section>
-
-  <!-- LIVE NOW -->
-  <section class="live-now-section" id="liveNowSection">
-    <div class="section-heading">
-      <span class="live-now-title"><span class="live-dot"></span>Live Now</span>
-    </div>
-    <div class="live-now-grid" id="liveNowGrid"></div>
-  </section>
-
-  <!-- TOP LEAGUES -->
-  <section class="top-leagues-section" id="topLeaguesSection">
-    <div class="section-heading"><span>Top Leagues</span></div>
-    <div class="top-leagues-scroll" id="topLeaguesScroll"></div>
-  </section>
-
   <!-- LOGIN / ACCOUNT MODAL -->
   <div class="team-modal" id="authModal">
     <div class="team-modal-backdrop" onclick="closeAuthModal()"></div>
@@ -135,43 +110,35 @@
   </div>
 
   <div class="main-layout">
-    <!-- LEFT SIDEBAR -->
-    <aside class="sidebar glass" id="sidebar">
-      <h3>Competitions</h3>
+    <!-- LEFT: the leagues that have matches on the selected day -->
+    <aside class="sidebar" id="sidebar">
+      <h3>Leagues</h3>
       <div id="competitions"></div>
     </aside>
 
-    <!-- CENTER -->
-    <main class="content glass">
-      <div class="date-bar">
-        <button id="liveBtn" class="live-nav-btn" onclick="jumpToLive()" aria-label="Jump to live matches">
-          <span class="live-dot"></span>LIVE
-        </button>
-        <div class="date-nav">
-          <button id="prevDay" class="date-btn" aria-label="Previous day">‹</button>
-          <span class="date-label">Today</span>
-          <button id="nextDay" class="date-btn" aria-label="Next day">›</button>
-        </div>
-        <div class="calendar-nav-btn" id="calendarBtn" aria-label="Pick a date">
-          <span class="calendar-icon">📅</span>
-          <span class="calendar-day-num" id="calendarDayNum"></span>
-          <input type="date" id="datePickerInput" class="date-picker-input" aria-label="Choose date" onchange="if(this.value) loadMatchesForDate(new Date(this.value + 'T00:00:00'))">
-        </div>
-      </div>
-      <div class="view-toggle">
-        <button id="viewMatchesBtn" class="view-toggle-btn active" onclick="setViewMode('matches')">All Matches</button>
-        <button id="viewTeamsBtn" class="view-toggle-btn" onclick="setViewMode('teams')">All Teams</button>
+    <!-- CENTER: the match list -->
+    <main class="content">
+      <nav class="view-toggle" aria-label="Sections">
+        <button id="viewMatchesBtn" class="view-toggle-btn active" onclick="setViewMode('matches')">Matches</button>
+        <button id="viewTeamsBtn" class="view-toggle-btn" onclick="setViewMode('teams')">Teams</button>
         <button id="viewFavoritesBtn" class="view-toggle-btn" onclick="setViewMode('favorites')">★ Favorites</button>
         <button id="viewLeaderboardBtn" class="view-toggle-btn" onclick="setViewMode('leaderboard')">🏆 Leaderboard</button>
         <button id="viewMyPredictionsBtn" class="view-toggle-btn" onclick="setViewMode('mypredictions')">My Predictions</button>
-      </div>
+      </nav>
+      <div class="day-strip" id="dayStrip"></div>
       <div id="matches"></div>
     </main>
 
-    <!-- RIGHT SIDEBAR -->
-    <aside class="rightbar glass">
-      <h3>Today's Featured</h3>
-      <div id="featured"></div>
+    <!-- RIGHT: live now + match of the day -->
+    <aside class="rightbar">
+      <section class="rail-card">
+        <h3><span class="live-dot"></span>Live now</h3>
+        <div id="liveNowList"><div class="rail-empty">Loading…</div></div>
+      </section>
+      <section class="rail-card">
+        <h3>Match of the day</h3>
+        <div id="featured"></div>
+      </section>
     </aside>
   </div>
 
@@ -180,7 +147,7 @@
       <h4>Leagues</h4>
       <div class="footer-leagues-grid" id="footerLeaguesGrid"></div>
     </div>
-    <div class="site-footer">Data from TheSportsDB and API-Football. GoalHub 2026</div>
+    <div class="site-footer">Match data from API-Football; team profiles from TheSportsDB. GoalHub 2026</div>
     <div class="footer-legal-links">
       <a href="terms">Terms of Use</a>·<a href="privacy">Privacy Policy</a>
     </div>
@@ -188,16 +155,16 @@
 
   <!-- MOBILE BOTTOM NAV (≤699px only — see .mobile-bottom-nav in styles.css) -->
   <nav class="mobile-bottom-nav" id="mobileBottomNav" aria-label="Primary">
+    <button class="mobile-nav-btn" onclick="resetMatchFilters(); setViewMode('matches'); window.scrollTo({top:0,behavior:'smooth'})" aria-label="Scores">
+      <span class="mobile-nav-icon">⚽</span><span>Scores</span>
+    </button>
     <button class="mobile-nav-btn" onclick="jumpToLive()" aria-label="Live scores">
       <span class="mobile-nav-icon">🔴</span><span>Live</span>
     </button>
-    <button class="mobile-nav-btn" onclick="document.getElementById('topLeaguesSection').scrollIntoView({behavior:'smooth'})" aria-label="Leagues">
-      <span class="mobile-nav-icon">🏆</span><span>Leagues</span>
-    </button>
-    <button class="mobile-nav-btn" onclick="setViewMode('favorites'); document.querySelector('.main-layout').scrollIntoView({behavior:'smooth'})" aria-label="Favorites">
+    <button class="mobile-nav-btn" onclick="setViewMode('favorites'); window.scrollTo({top:0,behavior:'smooth'})" aria-label="Favorites">
       <span class="mobile-nav-icon">★</span><span>Favorites</span>
     </button>
-    <button class="mobile-nav-btn" onclick="setViewMode('mypredictions'); document.querySelector('.main-layout').scrollIntoView({behavior:'smooth'})" aria-label="Predictions">
+    <button class="mobile-nav-btn" onclick="setViewMode('mypredictions'); window.scrollTo({top:0,behavior:'smooth'})" aria-label="Predictions">
       <span class="mobile-nav-icon">🔮</span><span>Predict</span>
     </button>
   </nav>

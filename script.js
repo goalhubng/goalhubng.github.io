@@ -1024,10 +1024,25 @@ function applyUrlState() {
   }
   if (matchParam && fixturesById[matchParam]) {
     openMatchModal(matchParam);
+  } else if (matchParam && /^af-\d+$/.test(matchParam)) {
+    openMatchById(matchParam);
   }
   if (liveParam && liveFixturesById[liveParam]) {
     openLiveMatchModal(liveParam);
   }
+}
+
+// A shared link to a match that isn't in the day list currently on screen:
+// fetch that one match, add it to the lookup table, then open it normally.
+async function openMatchById(matchId) {
+  if (currentMatchFixture && currentMatchFixture.id === matchId) return;
+  try {
+    const data = await fetchWorkerJson("/fixture?id=" + matchId.slice(3));
+    if (!data.fixture) return;
+    const f = afToFixture(data.fixture);
+    fixturesById[f.id] = f;
+    openMatchModal(f.id);
+  } catch (err) { /* link to a match we can't load right now — leave the page as-is */ }
 }
 
 window.addEventListener("popstate", () => {
@@ -1348,7 +1363,7 @@ const STATUS_LABELS = {
 };
 
 function isLiveStatus(status) {
-  return !!status && !["NS", "FT", "AET", "PEN", "PST", "CANC", "ABD"].includes(status);
+  return !!status && !["NS", "TBD", "FT", "AET", "PEN", "PST", "CANC", "ABD", "AWD", "WO"].includes(status);
 }
 
 function isFinishedStatus(status) {
@@ -1356,6 +1371,22 @@ function isFinishedStatus(status) {
 }
 
 function matchStatusDisplay(f) {
+  if (f.source === "af") {
+    // API-Football feed: status, score and real live minute all come in the
+    // same record, so no cross-referencing is needed.
+    if (["PST", "CANC", "ABD", "AWD", "WO", "SUSP", "INT"].includes(f.status)) {
+      const label = { PST: "Postponed", CANC: "Cancelled", ABD: "Abandoned", AWD: "Awarded", WO: "Walkover", SUSP: "Suspended", INT: "Interrupted" }[f.status];
+      return { primary: f.time || "TBD", tag: label };
+    }
+    const noScore = f.homeScore === null || f.homeScore === undefined || f.awayScore === null || f.awayScore === undefined;
+    if (noScore || f.status === "NS" || f.status === "TBD") return { primary: f.time || "TBD", tag: "" };
+    const scoreText = `${f.homeScore} - ${f.awayScore}`;
+    if (["1H", "2H", "ET", "LIVE"].includes(f.status)) {
+      return { primary: scoreText, tag: f.elapsed != null ? `${f.elapsed}${f.extra ? "+" + f.extra : ""}'` : STATUS_LABELS[f.status] || "LIVE" };
+    }
+    const penNote = f.status === "PEN" && f.pen ? ` (${f.pen[0]}-${f.pen[1]} pens)` : "";
+    return { primary: scoreText, tag: (STATUS_LABELS[f.status] || f.status || "LIVE") + penNote };
+  }
   const hasScore = f.homeScore !== null && f.homeScore !== undefined && f.awayScore !== null && f.awayScore !== undefined;
   if (!hasScore || f.status === "NS" || !f.status) {
     return { primary: f.time || "TBD", tag: "" };
@@ -1529,6 +1560,46 @@ function normalizeTeamNameForMatch(name) {
   return name.toLowerCase().replace(/\b(fc|afc|cf)\b/g, "").replace(/[^a-z0-9]/g, "");
 }
 
+// Words that carry no identity on their own — a club-type prefix/suffix or a
+// connector. Dropped before comparing names so "RC Celta de Vigo" reduces to
+// {celta, vigo} and "Real Racing Club de Santander" to {racing, santander}.
+const TEAM_NAME_FILLER_WORDS = new Set(["fc", "afc", "cf", "rc", "cd", "ud", "sc", "ac", "as", "ss", "fk", "sk", "bk", "if", "real", "club", "de", "del", "la", "el", "the", "of", "and"]);
+
+function teamNameTokens(name) {
+  return name
+    .normalize("NFD").replace(/[̀-ͯ]/g, "") // "Alavés" -> "Alaves"
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(word => word && !TEAM_NAME_FILLER_WORDS.has(word));
+}
+
+// Two data sources rarely spell a club identically ("Athletic Club" vs
+// "Athletic Bilbao", "Celta Vigo" vs "RC Celta de Vigo"), so exact equality
+// wrongly treated the same match as two different ones and showed it twice.
+// Same club = the names share at least one distinctive word.
+function teamNamesMatch(a, b) {
+  const wordsA = teamNameTokens(a);
+  const wordsB = teamNameTokens(b);
+  if (wordsA.length === 0 || wordsB.length === 0) return normalizeTeamNameForMatch(a) === normalizeTeamNameForMatch(b);
+  return wordsA.some(word => wordsB.includes(word));
+}
+
+function minutesOfDay(hhmm) {
+  const [h, m] = (hhmm || "").split(":").map(Number);
+  return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : null;
+}
+
+// Same fixture = same league and day (caller guarantees), both clubs match,
+// and — when both kickoff times are known — within 3 hours of each other.
+// The time check is a safety net against merging two genuinely different
+// games between similarly-named clubs.
+function sameFixture(existing, home, away, time) {
+  if (!teamNamesMatch(existing.home.name, home) || !teamNamesMatch(existing.away.name, away)) return false;
+  const a = minutesOfDay(existing.time);
+  const b = minutesOfDay(time);
+  return a === null || b === null || Math.abs(a - b) <= 180;
+}
+
 // football-data.org names carry a trailing "FC"/"AFC"/"CF" that TheSportsDB's
 // names don't ("Brentford FC" vs "Brentford") — trimmed only from the end,
 // so a name that's legitimately just "AFC Bournemouth" (prefix) is untouched.
@@ -1555,11 +1626,8 @@ async function mergeFootballDataFixtures(centerDate, fixtures) {
         const data = await res.json();
         const existing = byLeague[league] || [];
         (data.matches || []).forEach(m => {
-          const homeKey = normalizeTeamNameForMatch(m.home.name);
-          const awayKey = normalizeTeamNameForMatch(m.away.name);
-          const alreadyHave = existing.some(f =>
-            normalizeTeamNameForMatch(f.home.name) === homeKey && normalizeTeamNameForMatch(f.away.name) === awayKey
-          );
+          const kickoff = m.utcDate ? new Date(m.utcDate).toTimeString().slice(0, 5) : "";
+          const alreadyHave = existing.some(f => sameFixture(f, m.home.name, m.away.name, kickoff));
           if (alreadyHave) return;
           const homeName = cleanFootballDataTeamName(m.home.name);
           const awayName = cleanFootballDataTeamName(m.away.name);
@@ -1593,6 +1661,18 @@ async function mergeFootballDataFixtures(centerDate, fixtures) {
   return fixtures.concat(additions);
 }
 
+// TheSportsDB's strTimeLocal is the *stadium's* local time, so a Lagos
+// viewer saw Spanish kickoffs an hour late and Saudi ones two hours late.
+// strTimestamp is UTC; converting it shows each match in the viewer's own
+// timezone. Falls back to the old fields only if the timestamp is missing.
+function kickoffInViewerTimezone(e) {
+  if (e.strTimestamp) {
+    const kickoff = new Date(e.strTimestamp.replace(" ", "T") + "Z");
+    if (!isNaN(kickoff)) return kickoff.toTimeString().slice(0, 5);
+  }
+  return (e.strTimeLocal || e.strTime || "").slice(0, 5);
+}
+
 async function fetchFixturesForWindow(centerDate) {
   const dateKeys = windowDates(centerDate).map(dateKey);
   const entries = Object.entries(LEAGUE_IDS);
@@ -1608,7 +1688,7 @@ async function fetchFixturesForWindow(centerDate) {
           id: e.idEvent,
           apiFootballId: e.idAPIfootball || null, // links this event to the real-minute data in liveFixturesById — see matchStatusDisplay()
           league,
-          time: (e.strTimeLocal || e.strTime || "").slice(0, 5),
+          time: kickoffInViewerTimezone(e),
           date: e.dateEventLocal || e.dateEvent,
           status: e.strStatus,
           venue: e.strVenue,
@@ -1656,44 +1736,210 @@ function getCachedFixtures(key) {
 // an honest "showing cached results" banner; null once a fetch succeeds.
 let fixturesStaleAt = null;
 
-async function loadFixturesAndRender() {
-  fixturesLoading = true;
-  matchesDiv.innerHTML = skeletonRows(6);
-  document.getElementById("featured").innerHTML = skeletonBlock();
-  document.querySelector(".date-label").textContent = dateBarLabel(currentDate);
-  document.getElementById("calendarDayNum").textContent = currentDate.getDate();
-  document.getElementById("datePickerInput").value = dateKey(currentDate);
+// --- The API-Football feed (GoalHub's main source now). One Worker call per
+// UTC calendar date returns every match GoalHub tracks for that date, taken
+// from a snapshot shared by all visitors — so this is one small request, not
+// 40+ per-league ones, and a match can't appear twice because there's only
+// one source. TheSportsDB (fetchFixturesForWindow above) remains as an
+// automatic fallback if the feed is ever unreachable.
+const afLeagueLogos = {};
 
+function leagueLogoFor(league) {
+  return afLeagueLogos[league] || leagueLogos[league] || "";
+}
+
+// "Regular Season - 28" -> "28"; knockout names ("Quarter-finals") stay as-is.
+function roundLabel(round) {
+  if (!round) return "";
+  const m = /(?:Regular Season|Round|Matchday)\D*(\d+)\s*$/i.exec(round);
+  return m ? m[1] : round;
+}
+
+function afToFixture(a) {
+  const kickoff = new Date(a.ts * 1000);
+  const league = a.league.name;
+  if (a.league.logo) afLeagueLogos[league] = a.league.logo;
+  return {
+    id: "af-" + a.id,
+    source: "af",
+    afId: a.id,
+    ts: a.ts,
+    league,
+    leagueCountry: a.league.country,
+    time: kickoff.toTimeString().slice(0, 5),
+    date: dateKey(kickoff),
+    status: a.status,
+    elapsed: a.elapsed,
+    extra: a.extra,
+    venue: a.venue,
+    venueId: "",
+    round: roundLabel(a.league.round),
+    homeScore: a.hg,
+    awayScore: a.ag,
+    halftime: a.ht,
+    pen: a.pen,
+    home: { id: "", afId: a.home.id, name: a.home.name, logo: a.home.logo, league },
+    away: { id: "", afId: a.away.id, name: a.away.name, logo: a.away.logo, league }
+  };
+}
+
+async function fetchWorkerJson(path, timeoutMs = 9000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(CHAT_WORKER_BASE + path, { signal: controller.signal });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// The viewer's local calendar day usually straddles two UTC dates (in
+// Lagos, local 00:00-01:00 is still the previous UTC date), so ask for
+// both and keep only the matches whose kickoff falls inside the local day.
+function utcDatesForLocalDay(date) {
+  const start = new Date(date);
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  const noon = new Date(start);
+  noon.setHours(12, 0, 0, 0);
+  const iso = d => d.toISOString().slice(0, 10);
+  const main = iso(noon);
+  const extras = [...new Set([iso(start), iso(new Date(end - 1))])].filter(k => k !== main);
+  return { start, end, main, extras };
+}
+
+let afMeta = { stale: false, ageSeconds: 0 };
+
+async function fetchFixturesFromApiFootball(centerDate) {
+  const { start, end, main, extras } = utcDatesForLocalDay(centerDate);
+  // The date holding the local noon is essential; the other UTC date only
+  // adds the few matches around midnight, so its failure isn't fatal.
+  const [mainResult, ...extraResults] = await Promise.allSettled([main, ...extras].map(k => fetchWorkerJson("/day-fixtures?date=" + k)));
+  if (mainResult.status !== "fulfilled" || !Array.isArray(mainResult.value.fixtures)) return { ok: false, fixtures: [] };
+  const payloads = [mainResult.value, ...extraResults.filter(r => r.status === "fulfilled" && Array.isArray(r.value.fixtures)).map(r => r.value)];
+  const seen = new Set();
+  const fixtures = [];
+  payloads.forEach(p => p.fixtures.forEach(a => {
+    if (seen.has(a.id)) return;
+    seen.add(a.id);
+    if (a.ts * 1000 >= start && a.ts * 1000 < end) fixtures.push(afToFixture(a));
+  }));
+  const meta = mainResult.value.meta || {};
+  return { ok: true, fixtures, meta: { stale: !!meta.stale, ageSeconds: meta.ageSeconds || 0 } };
+}
+
+let dataMode = "af"; // "af" = the API-Football feed, "legacy" = TheSportsDB fallback
+let loadSeq = 0;
+
+function isToday(date) {
+  return dateKey(date) === dateKey(new Date());
+}
+
+function setCurrentFixtures(fixtures) {
+  currentFixtures = fixtures;
+  fixturesById = Object.fromEntries(fixtures.map(f => [f.id, f]));
+}
+
+// silent = a background refresh (live score polling): no skeleton, no
+// fallback to the slow legacy source, and a failure just leaves what's
+// already on screen alone.
+async function loadFixturesAndRender({ silent = false } = {}) {
+  const seq = ++loadSeq;
   const cacheKey = dateKey(currentDate);
-  const result = await fetchFixturesForWindow(currentDate);
-  fixturesLoading = false;
+  renderDayStrip();
 
-  if (!result.ok) {
+  let paintedFromCache = false;
+  if (!silent) {
+    // Instant paint: show the last list we saw for this day right away and
+    // refresh it underneath, instead of a blank skeleton until the network
+    // answers.
     const cached = getCachedFixtures(cacheKey);
-    if (cached) {
-      currentFixtures = cached.fixtures;
-      fixturesById = Object.fromEntries(currentFixtures.map(f => [f.id, f]));
-      fixturesStaleAt = cached.cachedAt;
-      currentFixtures = cached.fixtures;
-      fixturesById = Object.fromEntries(currentFixtures.map(f => [f.id, f]));
+    if (cached && cached.fixtures.length) {
+      setCurrentFixtures(cached.fixtures);
+      fixturesStaleAt = null;
       loadMatches();
-      renderFeaturedMatch();
-      return;
+      paintedFromCache = true;
+    } else {
+      fixturesLoading = true;
+      matchesDiv.innerHTML = skeletonRows(6);
     }
-    currentFixtures = [];
-    fixturesById = {};
-    matchesDiv.innerHTML = `<div class="no-results">Couldn't reach the live football API right now (it can be flaky under load). <span class="retry-link" onclick="loadFixturesAndRender()">Tap to retry</span>.</div>`;
-    document.getElementById("featured").innerHTML = `<div class="team-no-fixture">Unavailable — retry above.</div>`;
+    document.getElementById("featured").innerHTML = skeletonBlock();
+  }
+
+  let result = null;
+  try {
+    result = await fetchFixturesFromApiFootball(currentDate);
+  } catch (err) {
+    result = { ok: false, fixtures: [] };
+  }
+  if (!result.ok && !silent) {
+    // One quick retry before the slow backup source: the usual cause is a
+    // momentary rate limit upstream that clears within seconds.
+    await sleep(4000);
+    if (seq !== loadSeq) return;
+    try { result = await fetchFixturesFromApiFootball(currentDate); } catch (err) { result = { ok: false, fixtures: [] }; }
+  }
+  if (seq !== loadSeq) return; // a newer date/refresh superseded this one
+
+  if (result.ok) {
+    dataMode = "af";
+    afMeta = result.meta;
+    fixturesLoading = false;
+    fixturesStaleAt = null;
+    setCurrentFixtures(result.fixtures);
+    cacheFixtures(cacheKey, currentFixtures);
+    if (viewMode === "matches") loadMatches();
+    if (!silent) renderFeaturedMatch();
     return;
   }
 
-  fixturesStaleAt = null;
-  currentFixtures = result.fixtures;
-  fixturesById = Object.fromEntries(currentFixtures.map(f => [f.id, f]));
-  cacheFixtures(cacheKey, currentFixtures);
-  loadMatches();
-  renderFeaturedMatch();
+  if (silent) return;
+
+  // The feed is unreachable: fall back to TheSportsDB (slower, but
+  // independent), then to whatever was cached.
+  let legacy = { ok: false, fixtures: [] };
+  try {
+    legacy = await fetchFixturesForWindow(currentDate);
+  } catch (err) { /* handled below */ }
+  if (seq !== loadSeq) return;
+  fixturesLoading = false;
+
+  if (legacy.ok) {
+    dataMode = "legacy";
+    fixturesStaleAt = null;
+    setCurrentFixtures(legacy.fixtures);
+    cacheFixtures(cacheKey, currentFixtures);
+    loadMatches();
+    renderFeaturedMatch();
+    return;
+  }
+
+  const cached = getCachedFixtures(cacheKey);
+  if (cached) {
+    setCurrentFixtures(cached.fixtures);
+    fixturesStaleAt = cached.cachedAt;
+    loadMatches();
+    renderFeaturedMatch();
+    return;
+  }
+  setCurrentFixtures([]);
+  matchesDiv.innerHTML = `<div class="no-results">Couldn't reach the football data right now. <span class="retry-link" onclick="loadFixturesAndRender()">Tap to retry</span>.</div>`;
+  document.getElementById("featured").innerHTML = `<div class="team-no-fixture">Unavailable — retry above.</div>`;
 }
+
+// Live scores: refresh the visible list every 30s while today (or any live
+// match) is on screen, and immediately when the tab comes back to the front.
+// The Worker answers from a shared snapshot, so this doesn't spend API quota
+// per visitor.
+function liveRefreshTick() {
+  if (document.hidden || dataMode !== "af" || fixturesLoading) return;
+  if (isToday(currentDate) || currentFixtures.some(f => isLiveStatus(f.status))) loadFixturesAndRender({ silent: true });
+}
+setInterval(liveRefreshTick, 30000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) liveRefreshTick(); });
 
 // --- Live Now (hero grid) — always the real live fixtures already loaded
 // for today, never mock data. An honest empty state when nothing's live
@@ -1776,8 +2022,13 @@ function refreshLiveMinutesInMatchList() {
   if (viewMode === "matches" && !fixturesLoading) loadMatches();
 }
 
+function setLiveCount(n) {
+  const el = document.getElementById("liveBtnCount");
+  if (el) el.textContent = n > 0 ? String(n) : "";
+}
+
 async function renderLiveNowSection() {
-  const grid = document.getElementById("liveNowGrid");
+  const grid = document.getElementById("liveNowList");
   let fixtures;
   let stale = null;
   try {
@@ -1789,7 +2040,7 @@ async function renderLiveNowSection() {
   } catch (err) {
     const cached = getFreshCachedLiveFixtures();
     if (!cached) {
-      grid.innerHTML = `<div class="live-now-empty">Couldn't load live matches right now. <span class="retry-link" onclick="renderLiveNowSection()">Tap to retry</span>.</div>`;
+      grid.innerHTML = `<div class="rail-empty">Couldn't load live matches. <span class="retry-link" onclick="renderLiveNowSection()">Retry</span></div>`;
       return;
     }
     fixtures = cached.fixtures;
@@ -1799,14 +2050,15 @@ async function renderLiveNowSection() {
     setTimeout(renderLiveNowSection, 8000);
   }
 
-  const live = fixtures.filter(f => AF_IN_PROGRESS_STATUSES.has(f.statusShort));
+  const live = fixtures.filter(f => AF_IN_PROGRESS_STATUSES.has(f.statusShort) && f.goalhubLeagueName);
 
   if (live.length === 0) {
     // Clear rather than leave stale — otherwise a match that just ended
     // would keep cross-referencing to its last-known (now wrong) minute in
     // the "All Matches" list (see matchStatusDisplay) indefinitely.
     liveFixturesById = {};
-    grid.innerHTML = `<div class="live-now-empty">No live matches right now. Check back during a matchday, or browse today's fixtures below.</div>`;
+    grid.innerHTML = `<div class="rail-empty">No live matches right now.</div>`;
+    setLiveCount(0);
     refreshLiveMinutesInMatchList();
     return;
   }
@@ -1814,27 +2066,19 @@ async function renderLiveNowSection() {
   liveFixturesById = Object.fromEntries(live.map(f => [f.id, f]));
   refreshLiveMinutesInMatchList();
 
+  setLiveCount(live.length);
   const staleBanner = stale
-    ? `<div class="cache-banner live-now-stale-banner">Reconnecting — showing scores from ${Math.max(1, Math.round((Date.now() - stale) / 1000))}s ago.</div>`
+    ? `<div class="rail-empty">Reconnecting — scores from ${Math.max(1, Math.round((Date.now() - stale) / 1000))}s ago.</div>`
     : "";
 
   grid.innerHTML = staleBanner + live.map(f => {
     const watching = notifyMeFixtures.has(f.id);
     return `
-    <div class="live-game-card hover-glow" onclick="openLiveMatchModal('${f.id}')">
-      <div class="live-game-league">${badgeImg(f.leagueLogo, f.league, "")}<span>${f.league}</span><span class="live-badge">LIVE</span></div>
-      <div class="live-game-row">
-        <div class="live-game-team">${badgeImg(f.home.logo, f.home.name, "")}<span>${f.home.name}</span></div>
-        <div class="live-game-score">${f.home.score ?? 0}</div>
-      </div>
-      <div class="live-game-row">
-        <div class="live-game-team">${badgeImg(f.away.logo, f.away.name, "")}<span>${f.away.name}</span></div>
-        <div class="live-game-score">${f.away.score ?? 0}</div>
-      </div>
-      <div class="live-game-footer">
-        <span class="live-game-minute">${afMinuteLabel(f)}</span>
-        <span class="notify-bell${watching ? " watching" : ""}" onclick="event.stopPropagation(); toggleNotifyMe('${f.id}')" title="Notify me on goals (while this tab is open)">${watching ? "🔔" : "🔕"}</span>
-      </div>
+    <div class="live-mini" onclick="openLiveFixture('${f.id}')">
+      <div class="live-mini-top"><span class="live-mini-league">${escapeHtml(f.goalhubLeagueName || f.league)}</span><span class="live-mini-minute">${afMinuteLabel(f)}</span></div>
+      <div class="live-mini-row">${badgeImg(f.home.logo, f.home.name, "")}<span class="live-mini-name">${escapeHtml(f.home.name)}</span><span class="live-mini-score">${f.home.score ?? 0}</span></div>
+      <div class="live-mini-row">${badgeImg(f.away.logo, f.away.name, "")}<span class="live-mini-name">${escapeHtml(f.away.name)}</span><span class="live-mini-score">${f.away.score ?? 0}</span></div>
+      <span class="notify-bell${watching ? " watching" : ""}" onclick="event.stopPropagation(); toggleNotifyMe('${f.id}')" title="Notify me on goals (while this tab is open)">${watching ? "🔔" : "🔕"}</span>
     </div>`;
   }).join("");
 
@@ -1950,6 +2194,14 @@ function openLiveMatchModal(fixtureId) {
   pushModalUrl("livematch", fixtureId);
 }
 
+// A "Live now" list item: open it in the full match modal when that match is
+// in the day list already loaded, otherwise in the lighter live-only modal.
+function openLiveFixture(afId) {
+  const f = fixturesById["af-" + afId];
+  if (f) openMatchModal(f.id);
+  else openLiveMatchModal(afId);
+}
+
 function closeLiveMatchModal() {
   document.getElementById("liveMatchModal").classList.remove("open");
   currentLiveFixture = null;
@@ -1957,11 +2209,12 @@ function closeLiveMatchModal() {
 }
 
 async function fetchLiveFixtureDetails(fixtureId) {
-  if (liveFixtureDetailsCache[fixtureId]) return liveFixtureDetailsCache[fixtureId];
+  const hit = liveFixtureDetailsCache[fixtureId];
+  if (hit && Date.now() - hit.at < 45000) return hit.data;
   const res = await fetch(`${CHAT_WORKER_BASE}/fixture-details?id=${fixtureId}`);
   if (!res.ok) throw new Error("bad response");
   const data = await res.json();
-  liveFixtureDetailsCache[fixtureId] = data;
+  liveFixtureDetailsCache[fixtureId] = { data, at: Date.now() };
   return data;
 }
 
@@ -2052,28 +2305,36 @@ function renderLiveLineupsTab(details) {
   return `<div class="lineup-grid">${lineups.map(renderSide).join("")}</div>`;
 }
 
-// --- Top Leagues strip — a curated set of leagues we actually have real
-// badge art and fixture data for (not a wishlist of competitions like
-// Champions League that aren't in GoalHub's tracked league list). African
-// leagues lead the row rather than being buried in the sidebar's full
-// A-Z list — GoalHub's real audience is Nigeria/West Africa first.
-const TOP_LEAGUES = ["Nigeria NPFL", "Egypt Premier League", "Morocco Botola", "South Africa PSL", "Premier League", "La Liga", "Serie A", "Bundesliga", "Ligue 1", "Brasileirao", "MLS"];
+// --- League ordering: African competitions lead (GoalHub's audience is
+// Nigeria/West Africa first), then the big European leagues and cups, then
+// everything else alphabetically. Drives both the order of the league groups
+// in the match list and the league rail beside it.
+const LEAGUE_PRIORITY = [
+  "Nigeria NPFL", "Nigeria Federation Cup", "CAF Champions League", "CAF Confederation Cup", "AFCON", "AFCON Qualifiers",
+  "World Cup Qualifiers - Africa", "CAF Super Cup", "Egypt Premier League", "South Africa PSL", "Morocco Botola",
+  "Ghana Premier League", "Algeria Ligue 1", "Tunisia Ligue 1", "Kenya Premier League", "Cameroon Elite One",
+  "Senegal Ligue 1", "Ivory Coast Ligue 1", "Zambia Super League",
+  "Champions League", "Premier League", "La Liga", "Serie A", "Bundesliga", "Ligue 1", "Europa League", "Conference League",
+  "World Cup", "Euro", "Nations League", "World Cup Qualifiers - Europe", "Club World Cup", "Copa America",
+  "FA Cup", "EFL Cup", "Copa del Rey", "DFB Pokal", "Coppa Italia", "Coupe de France", "Community Shield",
+  "Eredivisie", "Primeira Liga", "Super Lig", "Scottish Prem", "Saudi Pro", "Brasileirao", "MLS",
+  "Copa Libertadores", "Copa Sudamericana", "International Friendlies"
+];
+
+function leagueRank(league) {
+  const i = LEAGUE_PRIORITY.indexOf(league);
+  return i === -1 ? 1000 : i;
+}
+
+function compareLeagues(a, b) {
+  return leagueRank(a) - leagueRank(b) || a.localeCompare(b);
+}
 
 function jumpToLeague(league) {
   setViewMode("matches");
-  filterLeague(league, null);
-  document.querySelector(".main-layout").scrollIntoView({ behavior: "smooth" });
+  filterLeague(league);
+  window.scrollTo({ top: 0, behavior: "smooth" });
 }
-
-function renderTopLeaguesSection() {
-  const scroll = document.getElementById("topLeaguesScroll");
-  scroll.innerHTML = TOP_LEAGUES.map(league => `
-    <div class="top-league-card hover-glow" onclick="jumpToLeague('${league}')">
-      ${badgeImg(leagueLogos[league], league, "")}
-      <span>${league}</span>
-    </div>`).join("");
-}
-renderTopLeaguesSection();
 
 // Central entry point for any date change — arrows, the date picker, and
 // LIVE all funnel through here so the fetch/render/label logic lives in
@@ -2091,7 +2352,42 @@ function changeDate(delta) {
 
 function jumpToLive() {
   statusFilter = "live";
-  loadMatchesForDate(new Date());
+  activeLeague = "All";
+  setViewMode("matches");
+  if (isToday(currentDate)) loadMatches();
+  else loadMatchesForDate(new Date());
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+// The day strip: seven days around the selected one, plus arrows and a
+// calendar picker for anything further away.
+function renderDayStrip() {
+  const strip = document.getElementById("dayStrip");
+  if (!strip) return;
+  const base = new Date(currentDate);
+  base.setHours(0, 0, 0, 0);
+  const todayKey = dateKey(new Date());
+  const selectedKey = dateKey(base);
+  const chips = [];
+  for (let offset = -3; offset <= 3; offset++) {
+    const d = new Date(base);
+    d.setDate(d.getDate() + offset);
+    const key = dateKey(d);
+    const weekday = key === todayKey ? "Today" : d.toLocaleDateString("en-GB", { weekday: "short" });
+    chips.push(`
+      <button class="day-chip${key === selectedKey ? " active" : ""}${key === todayKey ? " is-today" : ""}" onclick="loadMatchesForDate(new Date('${key}T00:00:00'))" aria-label="${d.toDateString()}">
+        <span class="day-chip-week">${weekday}</span>
+        <span class="day-chip-date">${d.getDate()} ${d.toLocaleDateString("en-GB", { month: "short" })}</span>
+      </button>`);
+  }
+  strip.innerHTML = `
+    <button class="day-arrow" onclick="changeDate(-1)" aria-label="Previous day">‹</button>
+    <div class="day-chips">${chips.join("")}</div>
+    <button class="day-arrow" onclick="changeDate(1)" aria-label="Next day">›</button>
+    <label class="day-calendar" aria-label="Pick a date">
+      <span>📅</span>
+      <input type="date" value="${selectedKey}" onchange="if(this.value) loadMatchesForDate(new Date(this.value + 'T00:00:00'))">
+    </label>`;
 }
 
 let statusFilter = "all";
@@ -2101,19 +2397,35 @@ function setStatusFilter(filter) {
   loadMatches();
 }
 
+const SHORT_STATUS = { FT: "FT", AET: "AET", PEN: "PEN", HT: "HT", "1H": "1H", "2H": "2H", ET: "ET", BT: "BRK", P: "PEN" };
+
 function renderMatchRow(f) {
   const status = matchStatusDisplay(f);
   const favorited = isFavorited(f.id);
+  const scored = status.primary.includes(" - ");
+  const live = isLiveStatus(f.status);
+  const finished = isFinishedStatus(f.status);
+  const clock = scored ? (live ? status.tag : (SHORT_STATUS[f.status] || status.tag)) : status.primary;
+  const note = !scored && status.tag ? status.tag : "";
+  const [homeScore, awayScore] = scored ? status.primary.split(" - ") : ["", ""];
+  const safeHome = f.home.name.replace(/'/g, "");
+  const safeAway = f.away.name.replace(/'/g, "");
   return `
-    <div class="match-row" onclick="openMatchModal('${f.id}')">
-      <div class="match-status">${status.primary}${status.tag ? `<span class="match-tag">${status.tag}</span>` : ""}</div>
-      <div class="match-teams">
+    <div class="match-row${live ? " is-live" : ""}${finished ? " is-finished" : ""}" onclick="openMatchModal('${f.id}')">
+      <div class="mr-time">
+        <span class="mr-clock">${clock}</span>${note ? `<span class="mr-note">${note}</span>` : ""}
+      </div>
+      <div class="mr-teams">
         ${clickableTeam(f.home)}
         ${clickableTeam(f.away)}
       </div>
+      <div class="mr-scores">
+        <span class="mr-score${scored && f.homeScore > f.awayScore ? " lead" : ""}">${homeScore}</span>
+        <span class="mr-score${scored && f.awayScore > f.homeScore ? " lead" : ""}">${awayScore}</span>
+      </div>
       <div class="match-row-actions">
-        <span class="share-btn" onclick="event.stopPropagation(); shareMatch(this, '${f.id}', '${f.home.name.replace(/'/g, "")}', '${f.away.name.replace(/'/g, "")}')" aria-label="Share match">🔗</span>
-        <div class="fav-star${favorited ? " favorited" : ""}" onclick="event.stopPropagation(); toggleFavorite('${f.id}')">${favorited ? "★" : "☆"}</div>
+        <span class="share-btn" onclick="event.stopPropagation(); shareMatch(this, '${f.id}', '${safeHome}', '${safeAway}')" aria-label="Share match">🔗</span>
+        <div class="fav-star${favorited ? " favorited" : ""}" onclick="event.stopPropagation(); toggleFavorite('${f.id}')" aria-label="Star match">${favorited ? "★" : "☆"}</div>
       </div>
     </div>`;
 }
@@ -2146,120 +2458,134 @@ function flashShareFeedback(el, symbol) {
   setTimeout(() => { el.textContent = original; }, 1500);
 }
 
-// null = auto (apply the favorites filter whenever the user has any
-// favorite teams); true/false = the user explicitly toggled it via the
-// banner link below, overriding the auto behavior for this session.
-let showOnlyFavoritesOverride = null;
+// "My teams" filter: only matches involving a favorite team or a starred match.
+let mineOnly = false;
 
-function toggleFavoritesFilter() {
-  showOnlyFavoritesOverride = showOnlyFavoritesOverride === false ? null : false;
+function toggleMineOnly() {
+  mineOnly = !mineOnly;
   loadMatches();
+}
+
+function favoriteTeamNameSet() {
+  return currentUser && serverFavoritesByName ? new Set(serverFavoritesByName.keys()) : getLocalFavoriteTeamNames();
+}
+
+// The league list beside the matches: only competitions that actually have a
+// match on the selected day, in priority order, each with a count.
+function renderLeagueRail() {
+  const rail = document.getElementById("competitions");
+  if (!rail) return;
+  const counts = {};
+  currentFixtures.forEach(f => { counts[f.league] = (counts[f.league] || 0) + 1; });
+  const names = Object.keys(counts).sort(compareLeagues);
+  rail.innerHTML = `
+    <div class="comp-item${activeLeague === "All" ? " active" : ""}" onclick="filterLeague('All')"><span class="comp-name">All matches</span><span class="comp-count">${currentFixtures.length}</span></div>
+    ${names.map(name => `
+      <div class="comp-item${activeLeague === name ? " active" : ""}" onclick="filterLeague('${name.replace(/'/g, "\\'")}')">
+        ${badgeImg(leagueLogoFor(name), name, "")}<span class="comp-name">${escapeHtml(name)}</span><span class="comp-count">${counts[name]}</span>
+      </div>`).join("")}`;
 }
 
 function loadMatches() {
   document.getElementById("liveBtn").classList.toggle("active", statusFilter === "live");
+  renderLeagueRail();
+
   let fixturesToUse = activeLeague === "All" ? currentFixtures : currentFixtures.filter(f => f.league === activeLeague);
 
   if (searchTerm !== "") {
     const term = searchTerm.toLowerCase();
-    fixturesToUse = fixturesToUse.filter(f => f.home.name.toLowerCase().includes(term) || f.away.name.toLowerCase().includes(term));
+    fixturesToUse = fixturesToUse.filter(f => f.home.name.toLowerCase().includes(term) || f.away.name.toLowerCase().includes(term) || f.league.toLowerCase().includes(term));
   }
 
-  const favoriteTeamNames = currentUser && serverFavoritesByName ? new Set(serverFavoritesByName.keys()) : getLocalFavoriteTeamNames();
-  const hasFavoriteTeams = favoriteTeamNames.size > 0;
-  const applyFavoritesFilter = hasFavoriteTeams && showOnlyFavoritesOverride !== false;
-  let favoritesBanner = "";
-  if (hasFavoriteTeams) {
-    favoritesBanner = applyFavoritesFilter
-      ? `<div class="favorites-filter-banner">Showing only your favorite teams. <span class="retry-link" onclick="toggleFavoritesFilter()">View all matches</span></div>`
-      : `<div class="favorites-filter-banner"><span class="retry-link" onclick="toggleFavoritesFilter()">Show only my favorite teams</span></div>`;
-  }
-  if (applyFavoritesFilter) {
-    fixturesToUse = fixturesToUse.filter(f => favoriteTeamNames.has(f.home.name) || favoriteTeamNames.has(f.away.name));
+  if (mineOnly) {
+    const favoriteTeamNames = favoriteTeamNameSet();
+    fixturesToUse = fixturesToUse.filter(f => isFavorited(f.id) || favoriteTeamNames.has(f.home.name) || favoriteTeamNames.has(f.away.name));
   }
 
   const liveCount = fixturesToUse.filter(f => isLiveStatus(f.status)).length;
+  const finishedCount = fixturesToUse.filter(f => isFinishedStatus(f.status)).length;
+  const upcomingCount = fixturesToUse.filter(f => f.status === "NS" || f.status === "TBD" || !f.status).length;
 
-  const staleBanner = fixturesStaleAt
-    ? (() => {
-        const mins = Math.max(0, Math.round((Date.now() - fixturesStaleAt) / 60000));
-        return `<div class="cache-banner">Showing results from ${mins === 0 ? "just now" : mins + " min ago"} — live API unavailable right now. <span class="retry-link" onclick="loadFixturesAndRender()">Tap to retry</span>.</div>`;
-      })()
-    : "";
+  let notice = "";
+  if (fixturesStaleAt) {
+    const mins = Math.max(0, Math.round((Date.now() - fixturesStaleAt) / 60000));
+    notice = `<div class="cache-banner">Showing results from ${mins === 0 ? "just now" : mins + " min ago"} — live data unavailable right now. <span class="retry-link" onclick="loadFixturesAndRender()">Tap to retry</span>.</div>`;
+  } else if (dataMode === "af" && afMeta.stale && afMeta.ageSeconds > 180) {
+    notice = `<div class="cache-banner">Live updates are paused — showing scores from ${Math.round(afMeta.ageSeconds / 60)} min ago.</div>`;
+  } else if (dataMode === "legacy") {
+    notice = `<div class="cache-banner">Using our backup data source — live minutes may be missing.</div>`;
+  }
 
-  const filterBar = staleBanner + favoritesBanner + `
+  const filterBar = notice + `
     <div class="status-filter-bar">
-      <button class="status-filter-btn${statusFilter === "all" ? " active" : ""}" onclick="setStatusFilter('all')">All</button>
-      <button class="status-filter-btn status-filter-live${statusFilter === "live" ? " active" : ""}" onclick="setStatusFilter('live')"><span class="live-dot"></span>Live${liveCount ? ` (${liveCount})` : ""}</button>
-      <button class="status-filter-btn${statusFilter === "finished" ? " active" : ""}" onclick="setStatusFilter('finished')">Finished</button>
-      <button class="status-filter-btn${statusFilter === "upcoming" ? " active" : ""}" onclick="setStatusFilter('upcoming')">Upcoming</button>
+      <button class="status-filter-btn${statusFilter === "all" ? " active" : ""}" onclick="setStatusFilter('all')">All<span class="status-count">${fixturesToUse.length}</span></button>
+      <button class="status-filter-btn status-filter-live${statusFilter === "live" ? " active" : ""}" onclick="setStatusFilter('live')"><span class="live-dot"></span>Live${liveCount ? `<span class="status-count">${liveCount}</span>` : ""}</button>
+      <button class="status-filter-btn${statusFilter === "finished" ? " active" : ""}" onclick="setStatusFilter('finished')">Finished${finishedCount ? `<span class="status-count">${finishedCount}</span>` : ""}</button>
+      <button class="status-filter-btn${statusFilter === "upcoming" ? " active" : ""}" onclick="setStatusFilter('upcoming')">Upcoming${upcomingCount ? `<span class="status-count">${upcomingCount}</span>` : ""}</button>
+      <button class="status-filter-btn status-filter-mine${mineOnly ? " active" : ""}" onclick="toggleMineOnly()">★ My teams</button>
     </div>`;
 
   if (statusFilter === "live") fixturesToUse = fixturesToUse.filter(f => isLiveStatus(f.status));
   else if (statusFilter === "finished") fixturesToUse = fixturesToUse.filter(f => isFinishedStatus(f.status));
-  else if (statusFilter === "upcoming") fixturesToUse = fixturesToUse.filter(f => f.status === "NS" || !f.status);
+  else if (statusFilter === "upcoming") fixturesToUse = fixturesToUse.filter(f => f.status === "NS" || f.status === "TBD" || !f.status);
 
   if (fixturesToUse.length === 0) {
-    // The Live filter is scoped to GoalHub's ~40 tracked leagues for the
-    // selected day — genuinely different from the Live Now widget above,
-    // which shows live matches from anywhere. Spelling that out here (with
-    // a way to jump there) avoids it reading as a bug when the two disagree.
-    if (statusFilter === "live" && searchTerm === "" && activeLeague === "All") {
-      matchesDiv.innerHTML = filterBar + `<div class="no-results">No live matches in Top 40 Leagues right now. Check "Live Now" for all games.<br><span class="retry-link" onclick="document.getElementById('liveNowSection').scrollIntoView({behavior:'smooth'})">View All Live Games</span></div>`;
-      return;
+    const label = dateBarLabel(currentDate);
+    let message;
+    if (mineOnly) {
+      message = `No matches for your favorite teams on ${label}. Star teams in the Teams tab, or star individual matches with ☆.`;
+    } else if (statusFilter === "live") {
+      message = "No live matches right now.";
+    } else if (searchTerm || activeLeague !== "All" || statusFilter !== "all") {
+      message = `Nothing here for ${label}${searchTerm ? " matching your search" : ""}${activeLeague !== "All" ? " in " + escapeHtml(activeLeague) : ""}.`;
+    } else {
+      message = `No tracked matches on ${label}.`;
     }
-
-    const label = document.querySelector(".date-label").textContent;
-    // We can't always tell "genuinely no games that day" apart from "the
-    // free API had a silent hiccup and returned nothing" — so when there's
-    // no search/status filter involved, offer an easy retry rather than
-    // just asserting there's nothing to see.
-    const retryHint = searchTerm || statusFilter !== "all"
-      ? ""
-      : ` If that seems wrong, <span class="retry-link" onclick="loadFixturesAndRender()">tap to retry</span> — the free API can occasionally miss a request.`;
-    // Naming the active league makes it clear this is a real gap in that
-    // competition's schedule (leagues don't play every day) rather than a
-    // broken app — without it, an empty result reads as a bug.
-    const scopeLabel = activeLeague !== "All" ? activeLeague : "real";
-    matchesDiv.innerHTML = filterBar + `<div class="no-results">No ${scopeLabel} fixtures for ${label}${searchTerm ? " matching your search" : statusFilter !== "all" ? ` in "${statusFilter}"` : ""}. Try another ${statusFilter !== "all" ? "filter" : "day"}.${retryHint}</div>`;
+    matchesDiv.innerHTML = filterBar + `<div class="no-results">${message}${statusFilter !== "all" || activeLeague !== "All" || mineOnly ? ` <span class="retry-link" onclick="resetMatchFilters()">Clear filters</span>` : ""}</div>`;
     return;
   }
 
-  const leaguesToShow = [...new Set(fixturesToUse.map(f => f.league))];
+  const leaguesToShow = [...new Set(fixturesToUse.map(f => f.league))].sort(compareLeagues);
   let bodyHtml = "";
 
   const favoriteFixtures = fixturesToUse.filter(f => isFavorited(f.id));
   if (favoriteFixtures.length > 0) {
     bodyHtml += `<div class="league-group">
       <div class="league-title">
-        <span class="league-title-text"><span class="league-name">★ Favorites</span></span>
+        <span class="league-title-text"><span class="league-name">★ Starred</span></span>
       </div>
       ${favoriteFixtures.map(renderMatchRow).join("")}
     </div>`;
   }
 
+  const byKickoff = (a, b) => (a.ts || 0) - (b.ts || 0) || (a.time || "").localeCompare(b.time || "");
   leaguesToShow.forEach(league => {
-    const leagueFixtures = fixturesToUse
-      .filter(f => f.league === league)
-      .slice()
-      .sort((a, b) => (a.time || "").localeCompare(b.time || ""));
-
-    let html = `<div class="league-group">
+    const leagueFixtures = fixturesToUse.filter(f => f.league === league).slice().sort(byKickoff);
+    const country = (leagueFixtures[0] && leagueFixtures[0].leagueCountry) || LEAGUE_COUNTRY[league] || "";
+    bodyHtml += `<div class="league-group">
       <div class="league-title">
-        ${badgeImg(leagueLogos[league], league, "")}
+        ${badgeImg(leagueLogoFor(league), league, "")}
         <div class="league-title-text">
-          <span class="league-name">${league}</span>
-          <span class="league-country">${LEAGUE_COUNTRY[league] || ""}</span>
+          <span class="league-name">${escapeHtml(league)}</span>
+          <span class="league-country">${escapeHtml(country === "World" ? "" : country)}</span>
         </div>
         <span class="league-table-link" onclick="event.stopPropagation(); openLeagueTableModal('${league.replace(/'/g, "")}')">Table ›</span>
-      </div>`;
-
-    html += leagueFixtures.map(renderMatchRow).join("");
-    html += `</div>`;
-    bodyHtml += html;
+      </div>
+      ${leagueFixtures.map(renderMatchRow).join("")}
+    </div>`;
   });
 
   matchesDiv.innerHTML = filterBar + bodyHtml;
+}
+
+function resetMatchFilters() {
+  statusFilter = "all";
+  activeLeague = "All";
+  mineOnly = false;
+  searchTerm = "";
+  const input = document.getElementById("searchInput");
+  if (input) input.value = "";
+  loadMatches();
 }
 
 function searchTeams() {
@@ -2268,10 +2594,8 @@ function searchTeams() {
   else loadMatches();
 }
 
-function filterLeague(league, el) {
+function filterLeague(league) {
   activeLeague = league;
-  document.querySelectorAll(".comp-item").forEach(i => i.classList.remove("active"));
-  if (el) el.classList.add("active");
   if (viewMode === "teams") renderAllTeams();
   else loadMatches();
 }
@@ -2374,7 +2698,7 @@ async function submitScorePrediction(fixtureId) {
   if (!fixture || String(fixture.id) !== String(fixtureId)) return;
   const predictedHome = Number(document.getElementById("predictHomeScore").value);
   const predictedAway = Number(document.getElementById("predictAwayScore").value);
-  const kickoffAt = Math.floor(new Date(`${fixture.date}T${fixture.time || "00:00"}:00`).getTime() / 1000);
+  const kickoffAt = fixture.ts || Math.floor(new Date(`${fixture.date}T${fixture.time || "00:00"}:00`).getTime() / 1000);
   const status = document.getElementById("predictStatusMsg");
 
   try {
@@ -2430,6 +2754,7 @@ async function toggleFavoriteTeam(name) {
 
 function setViewMode(mode) {
   viewMode = mode;
+  document.body.dataset.view = mode;
   document.getElementById("viewMatchesBtn").classList.toggle("active", mode === "matches");
   document.getElementById("viewTeamsBtn").classList.toggle("active", mode === "teams");
   document.getElementById("viewFavoritesBtn").classList.toggle("active", mode === "favorites");
@@ -2568,27 +2893,7 @@ function renderAllTeams() {
   matchesDiv.innerHTML = html;
 }
 
-const compDiv = document.getElementById("competitions");
 const leagues = [...new Set(allTeams.map(t => t.league))].filter(l => l !== "Champions League");
-
-const VISIBLE_LEAGUE_COUNT = 5; // plus "All Leagues" = 6 chips shown before the toggle, on narrow screens
-
-compDiv.innerHTML = `<div class="comp-item active" onclick="filterLeague('All', this)"><span>All Leagues</span></div>`;
-leagues.forEach((league, i) => {
-  const extraClass = i >= VISIBLE_LEAGUE_COUNT ? " extra" : "";
-  compDiv.innerHTML += `<div class="comp-item${extraClass}" onclick="filterLeague('${league}', this)">${badgeImg(leagueLogos[league], league, "")}<span>${league}</span></div>`;
-});
-
-const hiddenCount = Math.max(0, leagues.length - VISIBLE_LEAGUE_COUNT);
-if (hiddenCount > 0) {
-  compDiv.innerHTML += `<div class="comp-item comp-toggle" id="compToggle" onclick="toggleMoreLeagues()"><span>+${hiddenCount} more</span></div>`;
-}
-
-function toggleMoreLeagues() {
-  const expanded = compDiv.classList.toggle("expanded");
-  const toggleLabel = document.querySelector("#compToggle span");
-  toggleLabel.textContent = expanded ? "Show less" : `+${hiddenCount} more`;
-}
 
 // Footer league links — every league GoalHub actually tracks, alphabetised,
 // each a real working link into the site (jumpToLeague), not a copy of
@@ -2643,7 +2948,13 @@ async function renderFeaturedMatch() {
 }
 
 function league_icon(league) {
-  return badgeImg(leagueLogos[league], league, "");
+  return badgeImg(leagueLogoFor(league), league, "");
+}
+
+// "28" -> "Round 28", "Quarter-finals" stays as-is.
+function roundText(round) {
+  if (!round) return "";
+  return /^\d+$/.test(String(round)) ? `Round ${round}` : String(round);
 }
 
 function formatApiDate(dateStr) {
@@ -2993,7 +3304,7 @@ function openMatchModal(matchId) {
   const status = matchStatusDisplay(fixture);
 
   document.getElementById("matchModalContent").innerHTML = `
-    <div class="match-modal-league">${league_icon(fixture.league)}<span>${fixture.league}</span><span class="match-modal-country">${LEAGUE_COUNTRY[fixture.league] || ""}</span></div>
+    <div class="match-modal-league">${league_icon(fixture.league)}<span>${fixture.league}</span><span class="match-modal-country">${fixture.leagueCountry || LEAGUE_COUNTRY[fixture.league] || ""}</span></div>
     <div class="match-modal-teams">
       <div class="match-modal-team" onclick="closeMatchModal(); openTeamModal('${fixture.home.id}','${fixture.home.name.replace(/'/g, "")}','${fixture.home.logo}','${fixture.league.replace(/'/g, "")}')">
         ${badgeImg(fixture.home.logo, fixture.home.name, "")}<span>${fixture.home.name}</span>
@@ -3009,6 +3320,7 @@ function openMatchModal(matchId) {
     <div class="match-modal-tabs">
       <button class="match-tab-btn active" data-tab="info" onclick="showMatchTab('info')">Info</button>
       ${fixture.status === "NS" || !fixture.status ? `<button class="match-tab-btn" data-tab="predict" onclick="showMatchTab('predict')">Predict</button>` : ""}
+      ${fixture.source === "af" && fixture.status !== "NS" && fixture.status !== "TBD" ? `<button class="match-tab-btn" data-tab="timeline" onclick="showMatchTab('timeline')">Timeline</button>` : ""}
       <button class="match-tab-btn" data-tab="lineups" onclick="showMatchTab('lineups')">Line-ups</button>
       <button class="match-tab-btn" data-tab="table" onclick="showMatchTab('table')">Table</button>
       <button class="match-tab-btn" data-tab="stats" onclick="showMatchTab('stats')">Stats</button>
@@ -3297,7 +3609,11 @@ async function showMatchTab(tab) {
   closeChatSocket(); // leaving chat/MOTM for a static tab — drop the connection
 
   const cacheKey = `${fixture.id}|${tab}`;
-  if (matchTabCache[cacheKey]) {
+  // Live/upcoming matches change under us (a timeline that was empty before
+  // kickoff, stats mid-game) — only static tabs, or anything for a finished
+  // match, are safe to replay from the cache.
+  const tabCacheable = ["info", "table", "h2h"].includes(tab) || isFinishedStatus(fixture.status);
+  if (tabCacheable && matchTabCache[cacheKey]) {
     body.innerHTML = matchTabCache[cacheKey];
     return;
   }
@@ -3307,10 +3623,11 @@ async function showMatchTab(tab) {
   let html, failed = false;
   try {
     if (tab === "info") html = await renderMatchInfoTab(fixture);
-    else if (tab === "lineups") html = await renderMatchLineupsTab(fixture);
+    else if (tab === "timeline") html = renderLiveTimelineTab(await fetchLiveFixtureDetails(fixture.afId));
+    else if (tab === "lineups") html = fixture.source === "af" ? renderLiveLineupsTab(await fetchLiveFixtureDetails(fixture.afId)) : await renderMatchLineupsTab(fixture);
     else if (tab === "table") html = await renderMatchTableTab(fixture);
-    else if (tab === "stats") html = await renderMatchStatsTab(fixture);
-    else if (tab === "h2h") html = await renderMatchH2HTab(fixture);
+    else if (tab === "stats") html = fixture.source === "af" ? await renderAfStatsTab(fixture) : await renderMatchStatsTab(fixture);
+    else if (tab === "h2h") html = fixture.source === "af" ? await renderAfH2HTab(fixture) : await renderMatchH2HTab(fixture);
   } catch (err) {
     // A transient fetch failure (network hiccup, shared free-key rate limit)
     // shouldn't get cached as if it were a real answer — that would leave
@@ -3324,7 +3641,7 @@ async function showMatchTab(tab) {
   // Only paint if the user hasn't switched tabs or closed the modal while
   // this fetch was in flight.
   if (currentMatchFixture && currentMatchFixture.id === fixture.id) {
-    if (!failed) matchTabCache[cacheKey] = html;
+    if (!failed && tabCacheable) matchTabCache[cacheKey] = html;
     body.innerHTML = html;
   }
 }
@@ -3423,7 +3740,7 @@ async function matchNarrative(fixture) {
     return `${leader} lead ${trailer} ${homeScore}-${awayScore}, ${label}.`;
   }
 
-  return `${home.name} host ${away.name}${round ? ` in Round ${round}` : ""}.`;
+  return `${home.name} host ${away.name}${round ? ` in ${roundText(round)}` : ""}.`;
 }
 
 const venueCache = {};
@@ -3451,7 +3768,7 @@ async function renderMatchInfoTab(fixture) {
     <div class="match-info-card">
       <div class="match-info-row"><span class="match-info-icon">📅</span>${formatApiDate(fixture.date)}${fixture.time ? " · " + fixture.time : ""}</div>
       ${fixture.venue ? `<div class="match-info-row"><span class="match-info-icon">📍</span>${fixture.venue}${capacity ? ` · Capacity ${capacity.toLocaleString()}` : ""}</div>` : ""}
-      ${fixture.round ? `<div class="match-info-row"><span class="match-info-icon">🏆</span>Round ${fixture.round}</div>` : ""}
+      ${fixture.round ? `<div class="match-info-row"><span class="match-info-icon">🏆</span>${roundText(fixture.round)}</div>` : ""}
     </div>`;
 }
 
@@ -3645,6 +3962,24 @@ async function renderMatchStatsTab(fixture) {
   return `<div class="stats-list">${rows}</div>`;
 }
 
+async function renderAfStatsTab(fixture) {
+  if (!isLiveStatus(fixture.status) && !isFinishedStatus(fixture.status)) {
+    return `<div class="team-no-fixture">Stats aren't available until the match starts.</div>`;
+  }
+  return renderLiveStatsTab(await fetchLiveFixtureDetails(fixture.afId), fixture);
+}
+
+async function renderAfH2HTab(fixture) {
+  const data = await fetchWorkerJson(`/h2h?homeAf=${fixture.home.afId}&awayAf=${fixture.away.afId}`);
+  if (!data.available) throw new Error("h2h unavailable");
+  if (!data.meetings || data.meetings.length === 0) {
+    return `<div class="team-no-fixture">${escapeHtml(fixture.home.name)} and ${escapeHtml(fixture.away.name)} have no previous meetings on record.</div>`;
+  }
+  return `
+    <div class="team-modal-section-title">Head-to-Head</div>
+    ${data.meetings.map(renderH2HMeetingRow).join("")}`;
+}
+
 function renderH2HResultRow(teamName, r) {
   if (!r) return `<div class="team-no-fixture">No recent result for ${teamName}.</div>`;
   const homeLogo = resolveLogo(r.strHomeTeamBadge, r.strHomeTeam);
@@ -3746,8 +4081,6 @@ async function renderMatchH2HTab(fixture) {
   return formHtml + h2hHtml;
 }
 
-document.getElementById("prevDay").addEventListener("click", () => changeDate(-1));
-document.getElementById("nextDay").addEventListener("click", () => changeDate(1));
 
 // A ?team= link doesn't depend on fixtures data (allTeams is already in
 // memory) so it's resolved right away — waiting on the fixtures/live-now
@@ -3765,45 +4098,98 @@ Promise.all([loadFixturesAndRender(), renderLiveNowSection()]).then(() => {
 });
 initAuth();
 
-// --- Dark/light theme toggle, persisted to localStorage. The actual switch
-// on load happens inline in <head> (before first paint, avoids a flash);
-// this just handles the runtime toggle and keeping the button icon in sync.
-const THEME_KEY = "goalhub_theme";
+// --- Theme: three modes — "auto" (the default: follows the device's own
+// light/dark setting, live), or an explicit "light"/"dark" pinned by the
+// toggle. The first paint is handled by the inline script in <head> (avoids
+// a flash); this handles the runtime toggle, the live system-change
+// listener, and keeping the button + browser theme-color in sync.
+//
+// A previous version saved every toggle tap as a permanent light/dark pin
+// under "goalhub_theme", so anyone who ever tapped it stopped getting
+// automatic switching forever. The new key below deliberately ignores that
+// old value, resetting everyone to Auto.
+const THEME_MODE_KEY = "goalhub_theme_mode";
+const THEME_MODES = ["auto", "light", "dark"];
+const THEME_MODE_UI = {
+  auto: { icon: "🌓", label: "Theme: automatic (follows your device). Tap to switch to light." },
+  light: { icon: "☀️", label: "Theme: light. Tap to switch to dark." },
+  dark: { icon: "🌙", label: "Theme: dark. Tap to switch to automatic." }
+};
 
-function applyThemeToggleIcon() {
-  const isLight = document.documentElement.getAttribute("data-theme") === "light";
-  document.getElementById("themeToggleBtn").textContent = isLight ? "☀️" : "🌙";
+function getThemeMode() {
+  try {
+    const mode = localStorage.getItem(THEME_MODE_KEY);
+    return THEME_MODES.includes(mode) ? mode : "auto";
+  } catch (err) {
+    return "auto";
+  }
+}
+
+function systemPrefersLight() {
+  try {
+    return window.matchMedia("(prefers-color-scheme: light)").matches;
+  } catch (err) {
+    return false;
+  }
+}
+
+function applyTheme() {
+  const mode = getThemeMode();
+  const light = mode === "light" || (mode === "auto" && systemPrefersLight());
+  if (light) {
+    document.documentElement.setAttribute("data-theme", "light");
+  } else {
+    document.documentElement.removeAttribute("data-theme");
+  }
+  const meta = document.getElementById("themeColorMeta");
+  if (meta) meta.setAttribute("content", light ? "#ffffff" : "#06080b");
+  const btn = document.getElementById("themeToggleBtn");
+  if (btn) {
+    const ui = THEME_MODE_UI[mode];
+    btn.textContent = ui.icon;
+    btn.setAttribute("aria-label", ui.label);
+    btn.title = ui.label;
+  }
 }
 
 function toggleTheme() {
-  const isLight = document.documentElement.getAttribute("data-theme") === "light";
-  if (isLight) {
-    document.documentElement.removeAttribute("data-theme");
-    localStorage.setItem(THEME_KEY, "dark");
-  } else {
-    document.documentElement.setAttribute("data-theme", "light");
-    localStorage.setItem(THEME_KEY, "light");
-  }
-  applyThemeToggleIcon();
+  const next = THEME_MODES[(THEME_MODES.indexOf(getThemeMode()) + 1) % THEME_MODES.length];
+  try {
+    if (next === "auto") localStorage.removeItem(THEME_MODE_KEY);
+    else localStorage.setItem(THEME_MODE_KEY, next);
+  } catch (err) { /* storage unavailable — applies for this page view only */ }
+  applyTheme();
 }
-applyThemeToggleIcon();
 
-// If the visitor has never used the toggle (no explicit choice saved yet),
-// keep following the device's light/dark setting live — e.g. the OS
-// switching to dark at sunset — rather than freezing whatever it was at
-// page load. The moment they do use the toggle, that choice takes over
-// permanently and this listener stops applying (checked fresh each time).
+try { localStorage.removeItem("goalhub_theme"); } catch (err) { /* old two-state pin — no longer used */ }
+applyTheme();
+
+// In Auto mode, follow the device live (e.g. the phone switching to dark at
+// sunset) instead of freezing whatever it was at page load. Checks the mode
+// fresh each time, so it never overrides an explicit Light/Dark pick.
+//
+// The MediaQueryList is held in a variable on purpose: a listener attached
+// to a throwaway matchMedia() object can be garbage-collected, silently
+// ending the live updates (caught in testing — the page stayed light after
+// the device flipped to dark).
+let systemThemeQuery = null;
 try {
-  window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", event => {
-    if (localStorage.getItem(THEME_KEY)) return; // explicit choice already made — don't override it
-    if (event.matches) {
-      document.documentElement.setAttribute("data-theme", "light");
-    } else {
-      document.documentElement.removeAttribute("data-theme");
-    }
-    applyThemeToggleIcon();
+  systemThemeQuery = window.matchMedia("(prefers-color-scheme: light)");
+  systemThemeQuery.addEventListener("change", () => {
+    if (getThemeMode() === "auto") applyTheme();
   });
-} catch (err) { /* matchMedia unavailable — manual toggle still works fine */ }
+} catch (err) { /* matchMedia unavailable — the toggle still works */ }
+
+// A backgrounded phone app often misses the OS switching themes while it
+// wasn't running — re-check whenever it comes back to the foreground.
+function resyncAutoTheme() {
+  if (getThemeMode() === "auto") applyTheme();
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") resyncAutoTheme();
+});
+window.addEventListener("pageshow", resyncAutoTheme);
+window.addEventListener("focus", resyncAutoTheme);
 
 // --- Sticky header intensifies (more opaque + shadow) once the page has
 // actually scrolled, rather than looking identical to the resting state.
@@ -3811,28 +4197,10 @@ window.addEventListener("scroll", () => {
   document.getElementById("siteHeader").classList.toggle("scrolled", window.scrollY > 8);
 }, { passive: true });
 
-// --- Fade-in-on-scroll for the new homepage sections. Plain
-// IntersectionObserver + CSS transition — no animation library needed.
-const scrollFadeObserver = new IntersectionObserver(entries => {
-  entries.forEach(entry => {
-    if (entry.isIntersecting) {
-      entry.target.classList.add("in-view");
-      scrollFadeObserver.unobserve(entry.target);
-    }
-  });
-}, { threshold: 0.1 });
-
-document.querySelectorAll(".hero-section, .live-now-section, .top-leagues-section, .main-layout")
-  .forEach(el => { el.classList.add("scroll-fade"); scrollFadeObserver.observe(el); });
-
-// Safety net: if the observer hasn't revealed a section within 3s (a real,
-// documented quirk in some iOS standalone/PWA WebViews, where
-// IntersectionObserver can fire late or not at all right at launch), force
-// it visible anyway — a page stuck invisible forever is a much worse
-// failure than skipping a fade-in animation.
-setTimeout(() => {
-  document.querySelectorAll(".scroll-fade:not(.in-view)").forEach(el => el.classList.add("in-view"));
-}, 3000);
+// (The old fade-in-on-scroll for the homepage sections was removed: the match
+// list is one very tall element, so an IntersectionObserver waiting for 10%
+// of it to be visible never fired and the whole page sat invisible until a
+// 3-second safety timer forced it. Content now just shows.)
 
 // --- Auto-refresh for "All Matches": currentFixtures is otherwise only
 // fetched once per page load / date change, so a match that goes from
@@ -3842,7 +4210,7 @@ setTimeout(() => {
 // no reason to spend the shared free key's quota polling an all-finished
 // or all-upcoming day.
 setInterval(() => {
-  if (fixturesLoading) return;
+  if (fixturesLoading || dataMode !== "legacy") return; // the feed path refreshes itself (liveRefreshTick)
   const hasLive = currentFixtures.some(f => isLiveStatus(f.status));
   if (hasLive) loadFixturesAndRender();
 }, 60000);

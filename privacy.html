@@ -11,12 +11,27 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
   <script>
+    // Same rule as the main page: "auto" (default) follows the device's
+    // light/dark setting, live; only an explicit Light/Dark pick saved by
+    // the main page's toggle overrides it.
     (function () {
+      function apply() {
+        try {
+          var mode = localStorage.getItem("goalhub_theme_mode") || "auto";
+          var light = mode === "light" || (mode === "auto" && window.matchMedia("(prefers-color-scheme: light)").matches);
+          if (light) document.documentElement.setAttribute("data-theme", "light");
+          else document.documentElement.removeAttribute("data-theme");
+        } catch (err) { /* default dark stays */ }
+      }
+      apply();
+      // Held on window on purpose: a listener on a throwaway matchMedia()
+      // object can be garbage-collected, silently ending live updates.
       try {
-        if (localStorage.getItem("goalhub_theme") === "light") {
-          document.documentElement.setAttribute("data-theme", "light");
-        }
-      } catch (err) { /* localStorage unavailable — default dark stays */ }
+        window.__ghThemeQuery = window.matchMedia("(prefers-color-scheme: light)");
+        window.__ghThemeQuery.addEventListener("change", apply);
+      } catch (err) {}
+      document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") apply(); });
+      window.addEventListener("pageshow", apply);
     })();
   </script>
 </head>

@@ -501,13 +501,23 @@ async function resolveDuePredictions(env) {
 
   for (const pred of due) {
     try {
-      const res = await fetch(`${SPORTSDB_BASE_WORKER}/lookupevent.php?id=${pred.fixture_id}`);
-      if (!res.ok) continue; // shared free key can be rate-limited — retried on the next leaderboard request
-      const data = await res.json();
-      const event = (data.events || [])[0];
-      if (!event || event.intHomeScore === null || event.intAwayScore === null) continue; // not actually finished yet
-      const actualHome = Number(event.intHomeScore);
-      const actualAway = Number(event.intAwayScore);
+      let actualHome, actualAway;
+      if (String(pred.fixture_id).startsWith("af-")) {
+        // Fixture ids from the API-Football feed look like "af-1234567".
+        const data = await apiFootballFetchStrict(env, `/fixtures?id=${String(pred.fixture_id).slice(3)}`);
+        const fx = (data.response || [])[0];
+        if (!fx || !["FT", "AET", "PEN"].includes(fx.fixture.status.short) || fx.goals.home === null || fx.goals.away === null) continue; // not finished yet
+        actualHome = Number(fx.goals.home);
+        actualAway = Number(fx.goals.away);
+      } else {
+        const res = await fetch(`${SPORTSDB_BASE_WORKER}/lookupevent.php?id=${pred.fixture_id}`);
+        if (!res.ok) continue; // shared free key can be rate-limited — retried on the next leaderboard request
+        const data = await res.json();
+        const event = (data.events || [])[0];
+        if (!event || event.intHomeScore === null || event.intAwayScore === null) continue; // not actually finished yet
+        actualHome = Number(event.intHomeScore);
+        actualAway = Number(event.intAwayScore);
+      }
       const points = pointsForPrediction(pred.predicted_home, pred.predicted_away, actualHome, actualAway);
       await env.goalhub_db
         .prepare("UPDATE predictions SET points = ?, resolved = 1 WHERE id = ?")
@@ -680,6 +690,228 @@ export class ChatRoom extends DurableObject {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Upstream-quota protection.
+//
+// 1) Only the query parameters a route actually uses take part in its cache
+//    key, and each is format-checked. Before this, adding a throwaway
+//    "?x=123" produced a brand-new cache entry — i.e. a fresh, billable API
+//    call — so anyone could drain the daily quota with a loop.
+// 2) apiFootballFetchStrict treats API-Football's "200 OK but errors:{...}"
+//    responses (rate limit, plan limits) as failures instead of an empty
+//    result that gets cached and shown as if it were the truth.
+// 3) cachedSnapshot keeps the latest good response per data set in D1,
+//    shared by every visitor and every Cloudflare location, refreshed at
+//    most once per TTL — and served as-is (marked stale) if the upstream API
+//    fails or the quota runs out.
+// ---------------------------------------------------------------------------
+
+const CACHEABLE_ROUTE_PARAMS = {
+  "/fixtures-by-date": ["date", "league"],
+  "/team-fixtures": ["team"],
+  "/live-fixtures": [],
+  "/fixture-details": ["id"],
+  "/h2h": ["home", "away", "homeAf", "awayAf"],
+  "/team-search": ["name"],
+  "/standings": ["competition", "season"],
+  "/fd-fixtures": ["competition", "date"],
+  "/day-fixtures": ["date"],
+  "/fixture": ["id"]
+};
+
+const PARAM_PATTERNS = {
+  date: /^\d{4}-\d{2}-\d{2}$/,
+  id: /^\d{1,10}$/,
+  team: /^\d{1,10}$/,
+  home: /^\d{1,10}$/,
+  away: /^\d{1,10}$/,
+  homeAf: /^\d{1,10}$/,
+  awayAf: /^\d{1,10}$/,
+  competition: /^[A-Z0-9]{2,5}$/,
+  season: /^\d{4}$/,
+  league: /^[A-Za-z0-9 .'&-]{1,40}$/,
+  name: /^.{1,60}$/
+};
+
+const MAX_DATE_DISTANCE_DAYS = 370;
+
+// Returns an error message for the first bad parameter, or null if all fine.
+function badRequestParam(url) {
+  const allowed = CACHEABLE_ROUTE_PARAMS[url.pathname];
+  if (!allowed) return null;
+  for (const name of allowed) {
+    const value = url.searchParams.get(name);
+    if (value === null) continue;
+    const pattern = PARAM_PATTERNS[name];
+    if (pattern && !pattern.test(value)) return `invalid ${name}`;
+    if (name === "date") {
+      const distanceDays = Math.abs(Date.parse(value + "T00:00:00Z") - Date.now()) / 86400000;
+      if (!Number.isFinite(distanceDays) || distanceDays > MAX_DATE_DISTANCE_DAYS) return "date out of range";
+    }
+  }
+  return null;
+}
+
+// The request as the cache should see it: same path, only the parameters
+// this route understands, in a fixed order.
+function canonicalCacheRequest(url) {
+  const clean = new URL(url.origin + url.pathname);
+  const allowed = CACHEABLE_ROUTE_PARAMS[url.pathname] || [];
+  [...allowed].sort().forEach(name => {
+    const value = url.searchParams.get(name);
+    if (value !== null) clean.searchParams.set(name, value);
+  });
+  return new Request(clean.toString(), { method: "GET" });
+}
+
+// Seconds a response may sit in Cloudflare's per-location edge cache. Kept
+// short for the live-ish routes because their real freshness rule lives in
+// the D1 snapshot below; the edge cache just absorbs bursts of visitors.
+function edgeCacheSeconds(pathname) {
+  if (pathname === "/live-fixtures" || pathname === "/day-fixtures" || pathname === "/fixture") return 15;
+  return 120;
+}
+
+async function apiFootballFetchStrict(env, path) {
+  if (Date.now() < afBlockedUntil) throw new Error("API-Football: temporarily paused after a limit error");
+  const data = await apiFootballFetch(env, path);
+  const errors = data.errors;
+  const hasErrors = Array.isArray(errors) ? errors.length > 0 : errors && Object.keys(errors).length > 0;
+  if (hasErrors) {
+    const text = JSON.stringify(errors);
+    if (/request|limit|quota/i.test(text)) afBlockedUntil = Date.now() + (/minute/i.test(text) ? 8000 : 300000);
+    throw new Error("API-Football: " + JSON.stringify(errors).slice(0, 200));
+  }
+  return data;
+}
+
+// Returns { body, ageSeconds, stale }. body is a JSON string.
+async function cachedSnapshot(env, key, ttlSeconds, buildFresh) {
+  const now = Math.floor(Date.now() / 1000);
+  let row = null;
+  try {
+    row = await env.goalhub_db.prepare("SELECT body, fetched_at FROM api_cache WHERE key = ?").bind(key).first();
+  } catch (err) {
+    console.error("snapshot read failed", key, err.message);
+  }
+  const ttl = row && typeof ttlSeconds === "function" ? ttlSeconds(row.body) : ttlSeconds;
+  if (row && now - row.fetched_at < ttl) {
+    return { body: row.body, ageSeconds: now - row.fetched_at, stale: false };
+  }
+  try {
+    const body = JSON.stringify(await buildFresh());
+    try {
+      await env.goalhub_db
+        .prepare("INSERT INTO api_cache (key, body, fetched_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET body = excluded.body, fetched_at = excluded.fetched_at")
+        .bind(key, body, now)
+        .run();
+    } catch (err) {
+      console.error("snapshot write failed", key, err.message);
+    }
+    return { body, ageSeconds: 0, stale: false };
+  } catch (err) {
+    if (row) return { body: row.body, ageSeconds: now - row.fetched_at, stale: true };
+    throw err;
+  }
+}
+
+// Runs cachedSnapshot and returns its payload object with a `meta` block the
+// frontend uses to show an honest "showing data from N minutes ago" note.
+async function snapshotPayload(env, key, ttlSeconds, buildFresh) {
+  const snap = await cachedSnapshot(env, key, ttlSeconds, buildFresh);
+  const payload = JSON.parse(snap.body);
+  payload.meta = { ageSeconds: snap.ageSeconds, stale: snap.stale };
+  return payload;
+}
+
+
+// ---------------------------------------------------------------------------
+// The single-source fixture feed (API-Football). ONE call per calendar date
+// returns every match in the world for that day; we keep the ones GoalHub
+// cares about and store them in a shared D1 snapshot.
+// ---------------------------------------------------------------------------
+
+// API-Football league id -> the name GoalHub shows. The first 42 are
+// GoalHub's original leagues (ids verified against API-Football's own
+// /leagues list); the rest are African leagues and the big cups/international
+// competitions people look for.
+const AF_TRACKED = {
+  39: "Premier League", 140: "La Liga", 135: "Serie A", 61: "Ligue 1", 307: "Saudi Pro", 78: "Bundesliga",
+  88: "Eredivisie", 94: "Primeira Liga", 203: "Super Lig", 179: "Scottish Prem", 235: "Russian PL",
+  71: "Brasileirao", 197: "Super League GR", 144: "Jupiler Pro", 253: "MLS", 128: "Liga Profesional Argentina",
+  218: "Austrian Bundesliga", 219: "Austrian Erste Liga", 40: "EFL Championship", 141: "La Liga 2",
+  62: "Ligue 2", 136: "Serie B", 79: "2. Bundesliga", 399: "Nigeria NPFL", 72: "Brazil Serie B",
+  129: "Argentina Primera Nacional", 204: "Turkey 1.Lig", 106: "Poland Ekstraklasa",
+  145: "Belgium Challenger Pro", 119: "Denmark Superliga", 113: "Sweden Allsvenskan",
+  103: "Norway Eliteserien", 263: "Mexico Liga de Expansion", 233: "Egypt Premier League",
+  288: "South Africa PSL", 200: "Morocco Botola", 255: "USA USL Championship", 99: "Japan J2 League",
+  293: "South Korea K League 2", 188: "Australia A-League", 301: "UAE Pro League", 909: "MLS Next Pro",
+  // more African leagues
+  570: "Ghana Premier League", 186: "Algeria Ligue 1", 202: "Tunisia Ligue 1", 276: "Kenya Premier League",
+  411: "Cameroon Elite One", 403: "Senegal Ligue 1", 386: "Ivory Coast Ligue 1", 400: "Zambia Super League",
+  1231: "Nigeria Federation Cup",
+  // cups + international
+  2: "Champions League", 3: "Europa League", 848: "Conference League", 5: "Nations League", 4: "Euro",
+  1: "World Cup", 6: "AFCON", 36: "AFCON Qualifiers", 12: "CAF Champions League",
+  20: "CAF Confederation Cup", 533: "CAF Super Cup", 29: "World Cup Qualifiers - Africa",
+  32: "World Cup Qualifiers - Europe", 15: "Club World Cup", 10: "International Friendlies",
+  13: "Copa Libertadores", 11: "Copa Sudamericana", 9: "Copa America", 45: "FA Cup", 48: "EFL Cup",
+  528: "Community Shield", 143: "Copa del Rey", 81: "DFB Pokal", 137: "Coppa Italia", 66: "Coupe de France",
+  772: "Leagues Cup", 17: "AFC Champions League Elite"
+};
+
+const AF_LIVE_STATUSES = new Set(["1H", "HT", "2H", "ET", "BT", "P", "INT", "LIVE", "SUSP"]);
+
+function compactFixture(f) {
+  const pen = f.score && f.score.penalty && f.score.penalty.home !== null ? [f.score.penalty.home, f.score.penalty.away] : null;
+  return {
+    id: f.fixture.id,
+    ts: f.fixture.timestamp,
+    status: f.fixture.status.short,
+    elapsed: f.fixture.status.elapsed,
+    extra: f.fixture.status.extra || null,
+    league: {
+      id: f.league.id,
+      name: AF_TRACKED[f.league.id] || f.league.name,
+      logo: f.league.logo,
+      country: f.league.country,
+      flag: f.league.flag,
+      round: f.league.round
+    },
+    home: { id: f.teams.home.id, name: f.teams.home.name, logo: f.teams.home.logo },
+    away: { id: f.teams.away.id, name: f.teams.away.name, logo: f.teams.away.logo },
+    hg: f.goals.home,
+    ag: f.goals.away,
+    ht: f.score && f.score.halftime && f.score.halftime.home !== null ? [f.score.halftime.home, f.score.halftime.away] : null,
+    pen,
+    venue: f.fixture.venue && f.fixture.venue.name ? f.fixture.venue.name : null
+  };
+}
+
+// How long a stored day snapshot stays fresh, judged from its own contents:
+// fast while games are live or about to start, slow when nothing is going on
+// — so the API quota is spent when it matters instead of on a fixed timer.
+function dayTtlSeconds(body, dateStr) {
+  let payload;
+  try { payload = JSON.parse(body); } catch (err) { return 0; }
+  const now = Math.floor(Date.now() / 1000);
+  const fixtures = payload.fixtures || [];
+  if (fixtures.some(f => AF_LIVE_STATUSES.has(f.status))) return 45;
+  const upcoming = fixtures.filter(f => f.status === "NS" || f.status === "TBD").map(f => f.ts).sort((a, b) => a - b);
+  if (upcoming.length) {
+    const untilNext = upcoming[0] - now;
+    if (untilNext <= 900) return 45; // starting soon, or already overdue to start
+    return Math.min(900, Math.max(60, untilNext - 60));
+  }
+  const dayStart = Date.parse(dateStr + "T00:00:00Z") / 1000;
+  return dayStart + 2 * 86400 < now ? 86400 : 1800; // long-finished day vs just-finished day
+}
+
+// A quota/rate-limit failure is remembered for a short while so a burst of
+// visitors doesn't keep hammering an API that already said no. Per Worker
+// instance, so it's a courtesy rather than a guarantee.
+let afBlockedUntil = 0;
+
 export default {
   async fetch(request, env, ctx) {
     if (request.method === "OPTIONS") {
@@ -753,8 +985,11 @@ export default {
       }
     }
 
+    const badParam = badRequestParam(url);
+    if (badParam) return jsonResponse({ error: badParam }, 400);
+
     const cache = caches.default;
-    const cacheKey = new Request(request.url, request);
+    const cacheKey = canonicalCacheRequest(url);
     const cached = await cache.match(cacheKey);
     if (cached) return cached;
 
@@ -788,14 +1023,14 @@ export default {
         // live match, not just a homepage-sized sample; only the
         // non-tracked "rest" fallback (used to pad the homepage grid when
         // few tracked-league games are live) is capped.
-        const data = await apiFootballFetch(env, "/fixtures?live=all");
+        payload = await snapshotPayload(env, "live", body => { try { return JSON.parse(body).fixtures.length ? 45 : 180; } catch (err) { return 0; } }, async () => {
+        const data = await apiFootballFetchStrict(env, "/fixtures?live=all");
         const all = data.response || [];
-        const trackedLeagueIds = new Set(Object.values(LEAGUE_IDS));
-        const leagueIdToGoalhubName = Object.fromEntries(Object.entries(LEAGUE_IDS).map(([name, id]) => [id, name]));
-        const tracked = all.filter(f => trackedLeagueIds.has(f.league.id));
-        const rest = all.filter(f => !trackedLeagueIds.has(f.league.id));
-        const chosen = tracked.length >= 6 ? tracked : [...tracked, ...rest].slice(0, 6);
-        payload = {
+        // Only competitions GoalHub tracks — same set as the day list, so
+        // "Live now" never shows a match that isn't in the match list.
+        const leagueIdToGoalhubName = AF_TRACKED;
+        const chosen = all.filter(f => AF_TRACKED[f.league.id]);
+        return {
           fixtures: chosen.map(f => ({
             id: f.fixture.id,
             league: f.league.name,
@@ -810,6 +1045,18 @@ export default {
             away: { name: f.teams.away.name, logo: f.teams.away.logo, score: f.goals.away }
           }))
         };
+        });
+      } else if (url.pathname === "/fixture") {
+        // One match by API-Football id — lets a shared ?match=af-123 link
+        // open even when that match isn't in the day list the visitor loaded.
+        const fixtureId = url.searchParams.get("id");
+        if (!fixtureId) return jsonResponse({ error: "missing id" }, 400);
+        payload = await snapshotPayload(env, "one:" + fixtureId, 60, async () => {
+          const data = await apiFootballFetchStrict(env, `/fixtures?id=${fixtureId}`);
+          const fx = (data.response || [])[0];
+          if (!fx) throw new Error("fixture not found");
+          return { fixture: compactFixture(fx) };
+        });
       } else if (url.pathname === "/fixture-details") {
         // Match modal for a Live Now card: real events (goals/cards/subs
         // with minutes), real team statistics (possession/shots/corners —
@@ -817,12 +1064,13 @@ export default {
         // actually populates), and real full lineups with formation.
         const fixtureId = url.searchParams.get("id");
         if (!fixtureId) return jsonResponse({ error: "missing id" }, 400);
+        payload = await snapshotPayload(env, "fx:" + fixtureId, 60, async () => {
         const [eventsData, statsData, lineupsData] = await Promise.all([
-          apiFootballFetch(env, `/fixtures/events?fixture=${fixtureId}`),
-          apiFootballFetch(env, `/fixtures/statistics?fixture=${fixtureId}`),
-          apiFootballFetch(env, `/fixtures/lineups?fixture=${fixtureId}`)
+          apiFootballFetchStrict(env, `/fixtures/events?fixture=${fixtureId}`),
+          apiFootballFetchStrict(env, `/fixtures/statistics?fixture=${fixtureId}`),
+          apiFootballFetchStrict(env, `/fixtures/lineups?fixture=${fixtureId}`)
         ]);
-        payload = {
+        return {
           events: (eventsData.response || []).map(e => ({
             minute: e.time.elapsed,
             extra: e.time.extra,
@@ -842,6 +1090,7 @@ export default {
             startXI: (t.startXI || []).map(p => ({ name: p.player.name, pos: p.player.pos, number: p.player.number }))
           }))
         };
+        });
       } else if (url.pathname === "/h2h") {
         // Real multi-season head-to-head history for the match modal's H2H
         // tab — previously just "each team's most recent result" because
@@ -853,7 +1102,9 @@ export default {
         // calls API-Football with the real IDs that comes back with.
         const homeId = url.searchParams.get("home");
         const awayId = url.searchParams.get("away");
-        if (!homeId || !awayId) return jsonResponse({ error: "missing home/away team id" }, 400);
+        const directHomeAf = url.searchParams.get("homeAf");
+        const directAwayAf = url.searchParams.get("awayAf");
+        if (!(directHomeAf && directAwayAf) && (!homeId || !awayId)) return jsonResponse({ error: "missing home/away team id" }, 400);
         // TheSportsDB's shared free key occasionally rate-limits with a
         // plain-text Cloudflare error page instead of JSON — parse
         // defensively so that shows up as "H2H temporarily unavailable"
@@ -863,12 +1114,15 @@ export default {
           if (!res.ok) return null;
           try { return await res.json(); } catch (err) { return null; }
         };
-        const [homeTeamData, awayTeamData] = await Promise.all([lookupTeam(homeId), lookupTeam(awayId)]);
-        if (!homeTeamData || !awayTeamData) {
-          return jsonResponse({ available: false, meetings: [] }, 200); // don't cache a lookup failure — worth retrying on the next request
+        let homeAfId = directHomeAf, awayAfId = directAwayAf;
+        if (!homeAfId || !awayAfId) {
+          const [homeTeamData, awayTeamData] = await Promise.all([lookupTeam(homeId), lookupTeam(awayId)]);
+          if (!homeTeamData || !awayTeamData) {
+            return jsonResponse({ available: false, meetings: [] }, 200); // don't cache a lookup failure — worth retrying on the next request
+          }
+          homeAfId = homeTeamData.teams && homeTeamData.teams[0] && homeTeamData.teams[0].idAPIfootball;
+          awayAfId = awayTeamData.teams && awayTeamData.teams[0] && awayTeamData.teams[0].idAPIfootball;
         }
-        const homeAfId = homeTeamData.teams && homeTeamData.teams[0] && homeTeamData.teams[0].idAPIfootball;
-        const awayAfId = awayTeamData.teams && awayTeamData.teams[0] && awayTeamData.teams[0].idAPIfootball;
         if (!homeAfId || !awayAfId) {
           payload = { available: false, meetings: [] };
         } else {
@@ -928,13 +1182,20 @@ export default {
             awayScore: m.score && m.score.fullTime ? m.score.fullTime.away : null
           }))
         };
-      } else if (url.pathname === "/debug-raw") {
-        // TEMPORARY: echoes the full, unfiltered upstream response (including
-        // errors/paging/results metadata) so we can see exactly why a query
-        // is coming back empty. Remove this route once fixtures are working.
-        const rawPath = url.searchParams.get("path");
-        if (!rawPath) return jsonResponse({ error: "missing path param" }, 400);
-        payload = await apiFootballFetch(env, rawPath);
+      } else if (url.pathname === "/day-fixtures") {
+        // Every tracked match on one UTC calendar date, from one shared
+        // API-Football call. The website asks for the 1-2 UTC dates that
+        // cover the viewer's local day and filters to that day itself.
+        const dateStr = url.searchParams.get("date");
+        if (!dateStr) return jsonResponse({ error: "missing date" }, 400);
+        payload = await snapshotPayload(env, "day:" + dateStr, body => dayTtlSeconds(body, dateStr), async () => {
+          const data = await apiFootballFetchStrict(env, "/fixtures?date=" + dateStr);
+          const fixtures = (data.response || [])
+            .filter(f => AF_TRACKED[f.league.id])
+            .map(compactFixture)
+            .sort((a, b) => a.ts - b.ts);
+          return { date: dateStr, fixtures };
+        });
       } else {
         return jsonResponse({ error: "unknown endpoint" }, 404);
       }
@@ -949,7 +1210,7 @@ export default {
     // 2 minutes there means a goal or a match starting/ending can sit stale
     // on the homepage for up to 2 minutes, which defeats the point of a
     // pulsing "Live Now" indicator — so it gets a much shorter 20s window.
-    const cacheMaxAge = url.pathname === "/live-fixtures" ? 20 : 120;
+    const cacheMaxAge = edgeCacheSeconds(url.pathname);
     const response = jsonResponse(payload, 200, { "Cache-Control": `public, max-age=${cacheMaxAge}` });
     ctx.waitUntil(cache.put(cacheKey, response.clone()));
     return response;
