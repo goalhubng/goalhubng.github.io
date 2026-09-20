@@ -2034,7 +2034,8 @@ function setLiveCount(n) {
 
 // Bottom-nav highlight: which of the four tabs matches what's on screen.
 function updateBottomNav() {
-  const active = viewMode === "favorites" || viewMode === "teams" ? "favorites"
+  const active = viewMode === "teams" ? null
+    : viewMode === "favorites" ? "favorites"
     : viewMode === "mypredictions" || viewMode === "leaderboard" ? "predict"
     : statusFilter === "live" ? "live"
     : "scores";
@@ -2384,30 +2385,49 @@ function jumpToLive() {
 function renderDayStrip() {
   const strip = document.getElementById("dayStrip");
   if (!strip) return;
-  const base = new Date(currentDate);
-  base.setHours(0, 0, 0, 0);
-  const todayKey = dateKey(new Date());
-  const selectedKey = dateKey(base);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const selected = new Date(currentDate);
+  selected.setHours(0, 0, 0, 0);
+  const todayKey = dateKey(today);
+  const selectedKey = dateKey(selected);
+
+  // A fixed two-week window around today, so the chips stay put while you
+  // tap through days (the old strip re-centred on every tap and slid
+  // "Today" out of view). Jump far away with the calendar and the window
+  // moves to wherever you landed.
+  const SPAN = 7;
+  const offsetFromToday = Math.round((selected - today) / 86400000);
+  const anchor = Math.abs(offsetFromToday) <= SPAN ? today : selected;
+
   const chips = [];
-  for (let offset = -3; offset <= 3; offset++) {
-    const d = new Date(base);
+  for (let offset = -SPAN; offset <= SPAN; offset++) {
+    const d = new Date(anchor);
     d.setDate(d.getDate() + offset);
     const key = dateKey(d);
-    const weekday = key === todayKey ? "Today" : d.toLocaleDateString("en-GB", { weekday: "short" });
+    const diff = Math.round((d - today) / 86400000);
+    const top = diff === 0 ? "Today" : diff === 1 ? "Tmrw" : diff === -1 ? "Yday" : d.toLocaleDateString("en-GB", { weekday: "short" });
     chips.push(`
-      <button class="day-chip${key === selectedKey ? " active" : ""}${key === todayKey ? " is-today" : ""}" onclick="loadMatchesForDate(new Date('${key}T00:00:00'))" aria-label="${d.toDateString()}">
-        <span class="day-chip-week">${weekday}</span>
-        <span class="day-chip-date">${d.getDate()} ${d.toLocaleDateString("en-GB", { month: "short" })}</span>
+      <button class="day-chip${key === selectedKey ? " active" : ""}${key === todayKey ? " is-today" : ""}" data-date="${key}" onclick="loadMatchesForDate(new Date('${key}T00:00:00'))" aria-label="${d.toDateString()}"${key === selectedKey ? ' aria-current="date"' : ""}>
+        <span class="day-chip-week">${top}</span>
+        <span class="day-chip-num">${d.getDate()}</span>
+        <span class="day-chip-month">${d.toLocaleDateString("en-GB", { month: "short" })}</span>
       </button>`);
   }
   strip.innerHTML = `
-    <button class="day-arrow" onclick="changeDate(-1)" aria-label="Previous day">‹</button>
-    <div class="day-chips">${chips.join("")}</div>
-    <button class="day-arrow" onclick="changeDate(1)" aria-label="Next day">›</button>
+    <button class="day-arrow" onclick="changeDate(-1)" aria-label="Previous day"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg></button>
+    <div class="day-chips" id="dayChips">${chips.join("")}</div>
+    <button class="day-arrow" onclick="changeDate(1)" aria-label="Next day"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg></button>
     <label class="day-calendar" aria-label="Pick a date">
-      <span>📅</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="15.5" rx="3"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg>
       <input type="date" value="${selectedKey}" onchange="if(this.value) loadMatchesForDate(new Date(this.value + 'T00:00:00'))">
     </label>`;
+
+  // Centre the selected day in the scroller (horizontal only — scrollIntoView
+  // would also scroll the whole page).
+  const scroller = document.getElementById("dayChips");
+  const activeChip = scroller && scroller.querySelector(".day-chip.active");
+  if (activeChip) scroller.scrollLeft = activeChip.offsetLeft - (scroller.clientWidth - activeChip.offsetWidth) / 2;
 }
 
 let statusFilter = "all";
@@ -2782,6 +2802,10 @@ function setViewMode(mode) {
   document.getElementById("viewFavoritesBtn").classList.toggle("active", mode === "favorites");
   document.getElementById("viewLeaderboardBtn").classList.toggle("active", mode === "leaderboard");
   document.getElementById("viewMyPredictionsBtn").classList.toggle("active", mode === "mypredictions");
+  // Bring the newly active tab into view if the row is scrolled sideways.
+  const activeTab = document.querySelector(".view-toggle-btn.active");
+  const tabRow = document.querySelector(".view-toggle");
+  if (activeTab && tabRow) tabRow.scrollLeft = activeTab.offsetLeft - (tabRow.clientWidth - activeTab.offsetWidth) / 2;
   if (mode === "teams" || mode === "favorites") renderAllTeams();
   else if (mode === "leaderboard") renderLeaderboard();
   else if (mode === "mypredictions") renderMyPredictionsView();
@@ -2868,54 +2892,94 @@ function renderTeamCard(t) {
     </div>`;
 }
 
-function renderAllTeams() {
+// The clubs shown on the Teams page come from API-Football's current-season
+// list for one league at a time (fetched on demand, cached by the Worker for
+// a week) — not a hand-typed roster, so promoted/relegated clubs are right.
+// name -> AF league id, for domestic leagues only.
+const TEAM_LEAGUES = {
+  "Nigeria NPFL": 399, "Egypt Premier League": 233, "South Africa PSL": 288, "Morocco Botola": 200,
+  "Ghana Premier League": 570, "Algeria Ligue 1": 186, "Tunisia Ligue 1": 202, "Kenya Premier League": 276,
+  "Cameroon Elite One": 411, "Senegal Ligue 1": 403, "Ivory Coast Ligue 1": 386, "Zambia Super League": 400,
+  "Premier League": 39, "La Liga": 140, "Serie A": 135, "Bundesliga": 78, "Ligue 1": 61,
+  "Eredivisie": 88, "Primeira Liga": 94, "Super Lig": 203, "Scottish Prem": 179, "Saudi Pro": 307,
+  "Russian PL": 235, "Brasileirao": 71, "Super League GR": 197, "Jupiler Pro": 144, "MLS": 253,
+  "Liga Profesional Argentina": 128, "Austrian Bundesliga": 218, "Austrian Erste Liga": 219,
+  "EFL Championship": 40, "La Liga 2": 141, "Ligue 2": 62, "Serie B": 136, "2. Bundesliga": 79,
+  "Brazil Serie B": 72, "Argentina Primera Nacional": 129, "Turkey 1.Lig": 204, "Poland Ekstraklasa": 106,
+  "Belgium Challenger Pro": 145, "Denmark Superliga": 119, "Sweden Allsvenskan": 113, "Norway Eliteserien": 103,
+  "Mexico Liga de Expansion": 263, "USA USL Championship": 255, "Japan J2 League": 99,
+  "South Korea K League 2": 293, "Australia A-League": 188, "UAE Pro League": 301, "MLS Next Pro": 909
+};
+
+let teamsLeague = "Nigeria NPFL";
+const leagueTeamsCache = {};
+const knownTeams = {}; // name -> { name, logo, league } for every club seen so far
+
+async function loadLeagueTeams(league) {
+  if (leagueTeamsCache[league]) return leagueTeamsCache[league];
+  const data = await fetchWorkerJson("/league-teams?lid=" + TEAM_LEAGUES[league], 15000);
+  const teams = (data.teams || []).map(t => ({ name: t.name, logo: t.logo, league }));
+  teams.forEach(t => { knownTeams[t.name] = t; });
+  const result = { teams, partial: !!data.partial };
+  if (!result.partial) leagueTeamsCache[league] = result; // a partial list is retried next time
+  return result;
+}
+
+function setTeamsLeague(league) {
+  teamsLeague = league;
+  renderAllTeams();
+}
+
+// A favorite is stored by name only — recover its badge/league from anything
+// we've loaded (league lists, today's fixtures), else fall back to initials.
+function teamInfoForName(name) {
+  if (knownTeams[name]) return knownTeams[name];
+  for (const f of currentFixtures) {
+    if (f.home.name === name) return { name, logo: f.home.logo, league: f.league };
+    if (f.away.name === name) return { name, logo: f.away.logo, league: f.league };
+  }
+  const old = allTeams.find(t => t.name === name);
+  return old ? { name, logo: old.logo, league: old.league } : { name, logo: "", league: "" };
+}
+
+function renderTeamGrid(teams, emptyMsg) {
+  if (teams.length === 0) return `<div class="no-results">${emptyMsg}</div>`;
+  return `<div class="team-grid">${teams.map(renderTeamCard).join("")}</div>`;
+}
+
+async function renderAllTeams() {
   const term = searchTerm.trim().toLowerCase();
-  const favoritesOnly = viewMode === "favorites";
 
-  let teams = favoritesOnly ? allTeams.filter(t => isTeamFavorited(t.name)) : allTeams;
-  if (!favoritesOnly && activeLeague !== "All") teams = teams.filter(t => t.league === activeLeague);
-  if (term) teams = teams.filter(t => t.name.toLowerCase().includes(term) || t.league.toLowerCase().includes(term));
-
-  if (teams.length === 0) {
-    const emptyMsg = favoritesOnly
-      ? `No favorite teams yet. Star a team from the All Teams tab to save it here.`
-      : `No teams match${term ? ` "${searchTerm}"` : ""}. Try another search or league.`;
-    matchesDiv.innerHTML = `<div class="no-results">${emptyMsg}</div>`;
+  if (viewMode === "favorites") {
+    let teams = [...(currentUser && serverFavoritesByName ? serverFavoritesByName.keys() : getLocalFavoriteTeamNames())].map(teamInfoForName);
+    if (term) teams = teams.filter(t => t.name.toLowerCase().includes(term));
+    matchesDiv.innerHTML = renderTeamGrid(teams, "No favorite teams yet. Star a team from the Teams tab to save it here.");
     return;
   }
 
-  const leagueOptions = ["All", ...leagues]
-    .map(l => `<option value="${l}"${l === activeLeague ? " selected" : ""}>${l === "All" ? "All Leagues" : l}</option>`)
-    .join("");
-
-  const byLeague = {};
-  teams.forEach(t => { (byLeague[t.league] = byLeague[t.league] || []).push(t); });
-
-  let html = favoritesOnly ? "" : `
+  const leagueNames = Object.keys(TEAM_LEAGUES).sort(compareLeagues);
+  const options = leagueNames.map(l => `<option value="${l}"${l === teamsLeague ? " selected" : ""}>${l}</option>`).join("");
+  const controls = `
     <div class="team-view-controls">
-      <select class="league-filter-select" onchange="filterLeague(this.value, null)">${leagueOptions}</select>
+      <select class="league-filter-select" onchange="setTeamsLeague(this.value)" aria-label="League">${options}</select>
     </div>`;
 
-  Object.keys(byLeague).forEach(league => {
-    html += `
-      <div class="league-group">
-        <div class="league-title">
-          ${badgeImg(leagueLogos[league], league, "")}
-          <div class="league-title-text">
-            <span class="league-name">${league}</span>
-            <span class="league-country">${LEAGUE_COUNTRY[league] || ""}</span>
-          </div>
-        </div>
-        <div class="team-grid">
-          ${byLeague[league].map(renderTeamCard).join("")}
-        </div>
-      </div>`;
-  });
-
-  matchesDiv.innerHTML = html;
+  matchesDiv.innerHTML = controls + skeletonRows(5);
+  const requested = teamsLeague;
+  let body;
+  try {
+    const loaded = await loadLeagueTeams(requested);
+    let teams = loaded.teams;
+    if (term) teams = teams.filter(t => t.name.toLowerCase().includes(term));
+    body = (loaded.partial ? `<div class="cache-banner">Partial list — the full club list for this league isn't available right now, so these are the clubs from recent fixtures.</div>` : "") + renderTeamGrid(teams, term ? `No ${escapeHtml(requested)} club matches "${escapeHtml(searchTerm)}".` : "No clubs listed for this league yet.");
+  } catch (err) {
+    body = `<div class="no-results">Couldn't load this league's clubs right now. <span class="retry-link" onclick="renderAllTeams()">Tap to retry</span>.</div>`;
+  }
+  if (viewMode !== "teams" || teamsLeague !== requested) return; // user moved on while this loaded
+  matchesDiv.innerHTML = controls + body;
 }
 
-const leagues = [...new Set(allTeams.map(t => t.league))].filter(l => l !== "Champions League");
+const leagues = Object.keys(TEAM_LEAGUES);
 
 // Footer league links — every league GoalHub actually tracks, alphabetised,
 // each a real working link into the site (jumpToLeague), not a copy of

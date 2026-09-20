@@ -716,12 +716,14 @@ const CACHEABLE_ROUTE_PARAMS = {
   "/standings": ["competition", "season"],
   "/fd-fixtures": ["competition", "date"],
   "/day-fixtures": ["date"],
-  "/fixture": ["id"]
+  "/fixture": ["id"],
+  "/league-teams": ["lid"]
 };
 
 const PARAM_PATTERNS = {
   date: /^\d{4}-\d{2}-\d{2}$/,
   id: /^\d{1,10}$/,
+  lid: /^\d{1,5}$/,
   team: /^\d{1,10}$/,
   home: /^\d{1,10}$/,
   away: /^\d{1,10}$/,
@@ -769,6 +771,7 @@ function canonicalCacheRequest(url) {
 // the D1 snapshot below; the edge cache just absorbs bursts of visitors.
 function edgeCacheSeconds(pathname) {
   if (pathname === "/live-fixtures" || pathname === "/day-fixtures" || pathname === "/fixture") return 15;
+  if (pathname === "/league-teams") return 3600;
   return 120;
 }
 
@@ -859,6 +862,10 @@ const AF_TRACKED = {
   528: "Community Shield", 143: "Copa del Rey", 81: "DFB Pokal", 137: "Coppa Italia", 66: "Coupe de France",
   772: "Leagues Cup", 17: "AFC Champions League Elite"
 };
+
+// Competitions in AF_TRACKED that are cups / international tournaments (they
+// have no fixed club roster to list on the Teams page).
+const AF_NON_LEAGUE = new Set([2, 3, 848, 5, 4, 1, 6, 36, 12, 20, 533, 29, 32, 15, 10, 13, 11, 9, 45, 48, 528, 143, 81, 137, 66, 772, 17, 1231]);
 
 const AF_LIVE_STATUSES = new Set(["1H", "HT", "2H", "ET", "BT", "P", "INT", "LIVE", "SUSP"]);
 
@@ -1046,6 +1053,42 @@ export default {
           }))
         };
         });
+      } else if (url.pathname === "/league-teams") {
+        // The clubs currently in one league, for the Teams page — always the
+        // current season's real list (promotion/relegation included), kept in
+        // a snapshot for a week since rosters change once a year.
+        const lid = Number(url.searchParams.get("lid"));
+        if (!AF_TRACKED[lid] || AF_NON_LEAGUE.has(lid)) return jsonResponse({ error: "unknown league" }, 400);
+        try {
+        payload = await snapshotPayload(env, "teams:" + lid, 7 * 86400, async () => {
+          const lg = await apiFootballFetchStrict(env, `/leagues?id=${lid}&current=true`);
+          const seasons = (lg.response && lg.response[0] && lg.response[0].seasons) || [];
+          const current = seasons.find(s => s.current) || seasons[0];
+          if (!current) throw new Error("no current season");
+          const data = await apiFootballFetchStrict(env, `/teams?league=${lid}&season=${current.year}`);
+          const teams = (data.response || []).map(t => ({ id: t.team.id, name: t.team.name, logo: t.team.logo })).sort((a, b) => a.name.localeCompare(b.name));
+          if (teams.length === 0) throw new Error("no teams returned");
+          return { season: current.year, teams };
+        });
+        } catch (err) {
+          // The full list can't be fetched right now (upstream limit, or a
+          // plan that can't see the current season). Rather than show
+          // nothing, list the clubs seen in the match snapshots we already
+          // hold for this league — real and current, but only partial.
+          const { results } = await env.goalhub_db.prepare("SELECT body FROM api_cache WHERE key LIKE 'day:%'").all();
+          const seen = new Map();
+          for (const row of results || []) {
+            try {
+              for (const f of JSON.parse(row.body).fixtures || []) {
+                if (f.league.id !== lid) continue;
+                seen.set(f.home.id, { id: f.home.id, name: f.home.name, logo: f.home.logo });
+                seen.set(f.away.id, { id: f.away.id, name: f.away.name, logo: f.away.logo });
+              }
+            } catch (parseErr) { /* skip an unreadable row */ }
+          }
+          if (seen.size === 0) throw err;
+          payload = { partial: true, teams: [...seen.values()].sort((a, b) => a.name.localeCompare(b.name)) };
+        }
       } else if (url.pathname === "/fixture") {
         // One match by API-Football id — lets a shared ?match=af-123 link
         // open even when that match isn't in the day list the visitor loaded.
@@ -1210,7 +1253,7 @@ export default {
     // 2 minutes there means a goal or a match starting/ending can sit stale
     // on the homepage for up to 2 minutes, which defeats the point of a
     // pulsing "Live Now" indicator — so it gets a much shorter 20s window.
-    const cacheMaxAge = edgeCacheSeconds(url.pathname);
+    const cacheMaxAge = payload && payload.partial ? 60 : edgeCacheSeconds(url.pathname);
     const response = jsonResponse(payload, 200, { "Cache-Control": `public, max-age=${cacheMaxAge}` });
     ctx.waitUntil(cache.put(cacheKey, response.clone()));
     return response;

@@ -119,11 +119,11 @@
     <!-- CENTER: the match list -->
     <main class="content">
       <nav class="view-toggle" aria-label="Sections">
-        <button id="viewMatchesBtn" class="view-toggle-btn active" onclick="setViewMode('matches')">Matches</button>
-        <button id="viewTeamsBtn" class="view-toggle-btn" onclick="setViewMode('teams')">Teams</button>
-        <button id="viewFavoritesBtn" class="view-toggle-btn" onclick="setViewMode('favorites')">★ Favorites</button>
-        <button id="viewLeaderboardBtn" class="view-toggle-btn" onclick="setViewMode('leaderboard')">🏆 Leaderboard</button>
-        <button id="viewMyPredictionsBtn" class="view-toggle-btn" onclick="setViewMode('mypredictions')">My Predictions</button>
+        <button id="viewMatchesBtn" class="view-toggle-btn active" onclick="setViewMode('matches')"><svg class="vt-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5l3.8 2.8-1.5 4.4H9.7l-1.5-4.4z"/><path d="M12 7.5V3M15.8 10.3l4.2-1.4M14.3 14.7l2.6 3.6M9.7 14.7l-2.6 3.6M8.2 10.3L4 8.9"/></svg><span>Matches</span></button>
+        <button id="viewTeamsBtn" class="view-toggle-btn" onclick="setViewMode('teams')"><svg class="vt-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><path d="M16 5.2a3.2 3.2 0 010 5.6M18 14.3c1.8.8 3 2.6 3 4.7"/></svg><span>Teams</span></button>
+        <button id="viewFavoritesBtn" class="view-toggle-btn" onclick="setViewMode('favorites')"><svg class="vt-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5l2.6 5.4 5.9.8-4.3 4.1 1 5.9L12 16.9l-5.2 2.8 1-5.9L3.5 9.7l5.9-.8z"/></svg><span>Favorites</span></button>
+        <button id="viewLeaderboardBtn" class="view-toggle-btn" onclick="setViewMode('leaderboard')"><svg class="vt-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 01-10 0z"/><path d="M7 6H4v1.5A3.5 3.5 0 007.5 11M17 6h3v1.5a3.5 3.5 0 01-3.5 3.5"/></svg><span>Leaderboard</span></button>
+        <button id="viewMyPredictionsBtn" class="view-toggle-btn" onclick="setViewMode('mypredictions')"><svg class="vt-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.8"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/></svg><span>Predictions</span></button>
       </nav>
       <div class="day-strip" id="dayStrip"></div>
       <div id="matches"></div>
