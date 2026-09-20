@@ -912,23 +912,6 @@ const leagueLogos = {
   "MLS Next Pro": "https://r2.thesportsdb.com/images/media/league/badge/vokzs71650475719.png"
 };
 
-// Curated "marquee" clubs per league used to pick an eye-catching featured match.
-const marqueeClubs = [
-  "Arsenal", "Manchester United", "Manchester City", "Liverpool", "Chelsea", "Tottenham Hotspur",
-  "Real Madrid", "Barcelona", "Atletico Madrid",
-  "AC Milan", "Inter Milan", "Juventus", "AS Roma", "Napoli",
-  "Paris Saint-Germain", "Marseille", "Lyon", "Monaco",
-  "Al Hilal", "Al Nassr", "Al Ittihad", "Al Ahli",
-  "Bayern Munich", "Borussia Dortmund", "RB Leipzig",
-  "Ajax", "PSV Eindhoven", "Feyenoord",
-  "Benfica", "Porto", "Sporting CP",
-  "Galatasaray", "Fenerbahce", "Besiktas",
-  "Celtic", "Rangers",
-  "Zenit", "Spartak Moscow",
-  "Flamengo", "Palmeiras", "Corinthians", "Sao Paulo",
-  "Olympiacos", "Panathinaikos",
-  "Club Brugge", "Anderlecht"
-];
 
 // --- Broken-image safety net: any team/league badge that fails to load
 // falls back to a generated initials avatar instead of showing a blank icon.
@@ -2996,20 +2979,65 @@ renderFooterLeagues();
 // --- Today's Featured: highlights one of the currently-loaded real
 // fixtures, preferring a marquee matchup, so it always reflects an actual
 // game from the list rendered below (never an invented one).
+// Clubs with the biggest followings, compared by normalised full name (not
+// "shares a word": "Rangers" the Glasgow club must not match "Enugu Rangers").
+// Names are written the way API-Football spells them, incl. African clubs.
+const MARQUEE_CLUB_KEYS = new Set([
+  "arsenal", "manchester united", "manchester city", "liverpool", "chelsea", "tottenham", "tottenham hotspur", "newcastle united",
+  "real madrid", "barcelona", "atletico madrid", "milan", "inter", "inter milan", "juventus", "roma", "napoli",
+  "paris saint germain", "marseille", "lyon", "monaco", "bayern munich", "borussia dortmund", "dortmund", "rb leipzig",
+  "ajax", "psv", "psv eindhoven", "feyenoord", "benfica", "porto", "sporting cp", "galatasaray", "fenerbahce", "besiktas",
+  "celtic", "rangers", "al hilal", "al nassr", "al ittihad", "al ahli", "flamengo", "palmeiras", "corinthians", "sao paulo",
+  "boca juniors", "river plate", "olympiacos", "panathinaikos", "club brugge", "anderlecht", "zenit", "spartak moscow", "inter miami",
+  "enyimba", "kano pillars", "rivers united", "enugu rangers", "remo stars", "shooting stars",
+  "al ahly", "zamalek", "kaizer chiefs", "orlando pirates", "mamelodi sundowns", "wydad casablanca", "raja casablanca",
+  "esperance tunis", "asante kotoko", "hearts oak", "tp mazembe"
+].map(name => teamNameTokens(name).join(" ")));
+
+const TOP_TIER_COMPETITIONS = new Set([
+  "Nigeria NPFL", "CAF Champions League", "CAF Confederation Cup", "AFCON", "Egypt Premier League", "South Africa PSL",
+  "Morocco Botola", "Ghana Premier League", "Champions League", "Premier League", "La Liga", "Serie A", "Bundesliga",
+  "Ligue 1", "Europa League", "World Cup", "Euro", "Nations League", "Club World Cup"
+]);
+
+function isMarqueeClub(name) {
+  return MARQUEE_CLUB_KEYS.has(teamNameTokens(name).join(" "));
+}
+
+// "Match of the day" = the best-scoring match of the day on screen, and the
+// card says why. Live beats everything (it's the story right now), then big
+// competitions, then big clubs; the earlier kickoff breaks ties. Matches that
+// haven't finished are preferred; if the whole day is over, the best result.
+function pickFeaturedMatch(fixtures) {
+  const open = fixtures.filter(f => !isFinishedStatus(f.status) && !["PST", "CANC", "ABD", "AWD", "WO"].includes(f.status));
+  const pool = open.length > 0 ? open : fixtures;
+  const scored = pool.map(f => {
+    const homeBig = isMarqueeClub(f.home.name);
+    const awayBig = isMarqueeClub(f.away.name);
+    const bigCount = (homeBig ? 1 : 0) + (awayBig ? 1 : 0);
+    const tier = TOP_TIER_COMPETITIONS.has(f.league) ? 3 : leagueRank(f.league) < 1000 ? 2 : 1;
+    const live = isLiveStatus(f.status);
+    const score = (live ? 30 : 0) + tier * 20 + bigCount * 12 + (bigCount === 2 ? 10 : 0);
+    let reason;
+    if (live) reason = "It's live right now";
+    else if (bigCount === 2) reason = "Two of the biggest clubs in the game";
+    else if (bigCount === 1) reason = `${homeBig ? f.home.name : f.away.name} is one of the biggest clubs`;
+    else if (tier === 3) reason = "Top-tier competition";
+    else reason = "Best tracked fixture on the day";
+    return { f, score, reason };
+  });
+  scored.sort((x, y) => y.score - x.score || (x.f.ts || 0) - (y.f.ts || 0) || (x.f.time || "").localeCompare(y.f.time || ""));
+  return scored[0];
+}
+
 async function renderFeaturedMatch() {
   const featuredDiv = document.getElementById("featured");
   if (currentFixtures.length === 0) {
     featuredDiv.innerHTML = `<div class="team-no-fixture">No fixtures for ${dateBarLabel(currentDate)}.</div>`;
     return;
   }
-  const marqueeFixtures = currentFixtures.filter(f => marqueeClubs.includes(f.home.name) || marqueeClubs.includes(f.away.name));
-  const pool = (marqueeFixtures.length > 0 ? marqueeFixtures : currentFixtures).slice().sort((a, b) => {
-    const aUpcoming = a.status === "NS" ? 0 : 1;
-    const bUpcoming = b.status === "NS" ? 0 : 1;
-    if (aUpcoming !== bUpcoming) return aUpcoming - bUpcoming;
-    return `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`);
-  });
-  const fixture = pool[0];
+  const picked = pickFeaturedMatch(currentFixtures);
+  const fixture = picked.f;
   const { home, away, league } = fixture;
   const status = matchStatusDisplay(fixture);
   const narrative = await matchNarrative(fixture);
@@ -3030,6 +3058,8 @@ async function renderFeaturedMatch() {
       </div>
       <div class="featured-meta">${league_icon(league)}<strong>${league}</strong> · ${status.primary}</div>
       <div class="featured-narrative">${narrative}</div>
+      <div class="featured-reason">Why this match: ${picked.reason}</div>
+      <button class="featured-open" onclick="openMatchModal('${fixture.id}')">Match details ›</button>
     </div>`;
 }
 
